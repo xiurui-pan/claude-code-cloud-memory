@@ -6,41 +6,63 @@
 
 > **适用范围：** 目前只支持 cloud session。本地的 Claude Code CLI 和桌面端暂不支持，在[开发计划](#开发计划)里。
 
-Cloud session 每次都在全新的容器里运行，并且默认关闭了原生自动记忆。这个项目在容器里把原生自动记忆重新打开，再把记忆目录同步到你的服务端：新会话启动时拉取，每轮回复结束时推送。记忆的格式、加载方式、写入规则都沿用 Claude Code 原生机制，所有项目、所有会话共用同一个记忆库。
+Cloud session 每次都在全新的容器里运行，并且默认关闭了原生自动记忆。这个项目在容器里把原生自动记忆重新打开，再把记忆目录同步到你的服务端：新会话启动时拉取，每轮回复结束时推送。记忆的格式、加载方式、写入规则都沿用 Claude Code 原生机制。Cloud session 因此有了和本地 Claude Code 一样的两类记忆：按项目保存的自动记忆，以及对所有项目生效的全局指令 `~/.claude/CLAUDE.md`。
 
 主要特性：
 
-- 原生自动记忆（`MEMORY.md` 索引加每条记忆一个 `.md` 文件），模型侧没有任何自定义逻辑。
-- 服务端：sha 乐观锁、按文件后写者胜、`MEMORY.md` 三方行合并、完整历史和回滚。
-- 管理后台（浏览器）放在 Cloudflare Access 后面，自部署时用 token 登录：查看、编辑、新建、删除，单个文件的历史，整体回滚，同步状态面板。中英文界面。
+- **项目记忆**：原生自动记忆（`MEMORY.md` 索引加每条记忆一个 `.md` 文件），按项目分开存放。一个会话只看到自己项目的记忆。
+- **全局记忆**：`~/.claude/CLAUDE.md`，会话开始时生成，结束时同步回服务端，Claude Code 在每个项目里都会加载它。模型侧没有任何自定义逻辑。
+- 超仓库（superrepo）和它的 submodule 算同一个项目，从 `.gitmodules` 自动学到，不需要配置。
+- 服务端：sha 乐观锁、按文件后写者胜、每个 `MEMORY.md` 和全局 `CLAUDE.md` 的三方行合并、完整历史和回滚。
+- 管理后台（浏览器）放在 Cloudflare Access 后面，自部署时用 token 登录：文件按层分组（全局、各个项目、旧版根目录），编辑、新建、删除，在项目之间移动文件，合并项目，修改项目归属，单个文件的历史，整体回滚，同步状态面板。中英文界面。
 - 运行在 Cloudflare（推荐）或自部署（Docker 或 Node 22+，SQLite）上，两者跑同一份 `worker/*.js`。
 - 访问 token 不出现在环境变量、URL 和仓库里（它是 cloud 环境的 network secret）。
 - 出错看得见：对话里的 hook `systemMessage`、管理后台状态面板、Workers Logs。
 
 ## 工作原理
 
+和本地 Claude Code 一样有两类记忆：
+
+| | 项目记忆 | 全局记忆 |
+|---|---|---|
+| 原生对应物 | 按项目的自动记忆（`MEMORY.md` + 主题文件） | `~/.claude/CLAUDE.md` |
+| 在容器里 | `/root/memory/`，只有当前项目的文件 | `/root/.claude/CLAUDE.md` = 一小段引导 header + 你的全局条目 |
+| 在服务端 | `projects/<pid>/...` | `global/CLAUDE.md` |
+| 什么时候写入 | Claude 记下关于这个仓库、服务或部署的事实 | 你说「所有项目都记住这条」，或说明工作偏好 |
+
 ```
 新会话启动（容器由你的环境 setup script 预先配置好）
   └─ SessionStart hook: memsync.py pull
-       GET https://<你的域名>/v1/pull  →  写入 /root/memory/
-       └─ Claude Code 按原生机制加载 /root/memory/MEMORY.md（前 200 行或 25 KB）
+       1. 找出会话涉及的 git 仓库，POST /v1/resolve  →  项目 id
+       2. GET /v1/pull?projects=<pid>&global=1
+       3. 写入 /root/memory/（只含本项目）和 ~/.claude/CLAUDE.md（header + 全局正文）
+       └─ Claude Code 在第一轮按原生机制加载这两处
 工作中
-  └─ Claude 按原生规则写记忆：每条一个 .md 文件（带 frontmatter），并更新 MEMORY.md 索引
+  └─ Claude 按原生规则保存：项目事实 → 自动记忆；「所有项目都记住」→ CLAUDE.md
 每轮回复结束（Stop hook）/ 会话结束（SessionEnd hook）
-  └─ memsync.py push：把和上次同步相比有变化的文件 POST 到 /v1/push
+  └─ memsync.py push：有变化的项目文件 → projects/<pid>/...，CLAUDE.md 正文（去掉 header）→ global/CLAUDE.md
 
               ┌──────────────────────────── Claude cloud 容器 ────────────────────────────────┐
               │ ~/.claude/settings.json（由 setup script 写入）                                │
               │   env: CLAUDE_CODE_DISABLE_AUTO_MEMORY=0, MEMSYNC_URL, MEMSYNC_DIR            │
               │   autoMemoryDirectory: /root/memory                                            │
               │   hooks: SessionStart pull · Stop push · SessionEnd push                       │
+              │ /root/memory/MEMORY.md + 主题文件   ·   /root/.claude/CLAUDE.md                │
               └───────────────┬────────────────────────────────────────────────────────────────┘
                               │ HTTPS（出口代理自动加  Authorization: Bearer <network secret>）
                               ▼
-                  Cloudflare Worker  ──  D1（files、history、sync_events）
+                  Cloudflare Worker  ──  D1（files、history、repo_membership、projects、sync_events）
                         ▲
         /admin（Cloudflare Access JWT）  ←  你的浏览器
 ```
+
+**怎么让一条记忆变成全局的。** Cloud session 里没有 `/memory` 命令，所以 hook 写出的 `CLAUDE.md` 开头带一小段 header，告诉 Claude 这个文件放什么：你要求它在所有项目里记住的内容，以及你对它工作方式的偏好。关于某个仓库、服务或部署的内容留在自动记忆里。你说「所有项目都记住：用中文回复」，Claude 就改 `CLAUDE.md`；你说「这个仓库发版前要先更新 CHANGELOG」，它就写进该项目的自动记忆。Header 在生成 `CLAUDE.md` 时加上，推送前去掉，服务端只保存你的条目。每条写成一行短句：`CLAUDE.md` 没有 200 行的上限，每多一行，每个会话都要多花一行上下文。
+
+**项目。** 项目由仓库的 git remote 标识（`github.com/acme/platform`；https 和 ssh 写法、`.git`、凭据、大小写都会归一化）。超仓库和它的 submodule 是同一个项目：会话看到带 `.gitmodules` 的仓库时，客户端上报 submodule 的 URL，服务端记下 `acme/api` 和 `acme/chat` 属于 `acme/platform`。之后只挂载 `acme/api` 的会话也会落到同一个项目。不在任何仓库里的会话属于项目 `_norepo`。如果某个 submodule 在归属被学到之前已经用自己的项目攒了记忆，这些记忆会连同历史一起并入父项目。一个会话涉及几个互不相关的仓库时，它们的记忆会一起显示，新文件放进 shell 当前工作目录所在的仓库（见[设计文档](docs/design-cloud-v3.md#8-several-projects-in-one-session)）。
+
+**管理后台的分层。** 后台把文件分成全局、每个项目一组（附成员仓库）、旧版根目录（分层之前的数据，在你分类之前一直放在这里）。你可以把文件移到别的项目、合并两个项目、给项目添加仓库或把某个仓库拆出来。多项目会话按兜底规则放置的文件会列在「待确认」里。
+
+会话里写下的记忆在下一个会话生效，不在正在运行的这个会话里生效（Claude Code 每个会话只读一次 `CLAUDE.md` 和 `MEMORY.md`，原生行为也是这样）。
 
 ## 为什么在 cloud 里能这样做
 
@@ -49,7 +71,7 @@ Cloud session 每次都在全新的容器里运行，并且默认关闭了原生
 - **开关。** 设置了 `CLAUDE_CODE_REMOTE`（所有 cloud session 都有）且没设置 `CLAUDE_CODE_REMOTE_MEMORY_DIR` 时，CLI 会关闭原生自动记忆。
 - **文档没写的开关。** 把 `CLAUDE_CODE_DISABLE_AUTO_MEMORY` 设成 `0` 会走「强制开启」分支，不管上面那个条件。官方文档里没有这个行为（见「风险和限制」）。
 - **`settings.json` 会被读取。** 文档说 cloud 不读用户级 `~/.claude/settings.json`，意思只是你本机的那个文件不会被带上云。**容器里由 setup script 写入的同一个文件会被正常读取**，其中的 `hooks`、`env`、`autoMemoryDirectory` 都生效。
-- **时序。** SessionStart hook 写入的 `MEMORY.md` 来得及在第一轮被加载。
+- **时序。** 宿主会等 SessionStart hook 执行完。Hook 写入的 `MEMORY.md` 和 `~/.claude/CLAUDE.md` 都出现在第一轮的上下文里（实测，hook 里 sleep 5 秒也一样）。Claude Code 给这个文件的标签是「user's private global instructions for all projects」，和原生一致，文件里的 `@/绝对路径` 引用也有效。Setup script 写的 `CLAUDE.md` 会被 hook 的版本覆盖。会话中途的修改不会重新渲染进上下文。
 - **network secret 注入。** 在环境里配置的 network secret 会让出口代理给发往该主机的请求加上 `Authorization: Bearer <secret>`。Hook 发出的请求走代理，所以 `memsync.py` 自己不持有 token。setup script 执行时代理不会注入 secret，所以客户端下载接口（`/client/memsync.py`）是公开的，里面也没有任何密钥。
 - **setup script 快照缓存。** Setup script 的执行结果会作为容器快照缓存约 7 天，修改 setup script（或允许的网络主机）会让缓存重建。所以更新客户端要靠改 setup script，见「更新客户端」。
 
@@ -57,11 +79,15 @@ Cloud session 每次都在全新的容器里运行，并且默认关闭了原生
 
 | 路径 | 作用 |
 |---|---|
-| `worker/index.js` | Worker 入口（自部署服务原样运行它）：bearer 鉴权、pull、push、history、restore、status，`/admin*` 转给 `admin.js` |
-| `worker/store.js` | 共用写入路径：`writeRow`（sha 乐观锁 + 历史行）、`applyOne`、`restoreAt`、`recordStatus` |
+| `worker/index.js` | Worker 入口（自部署服务原样运行它）：bearer 鉴权、pull、push、resolve、move、history、restore、status，`/admin*` 转给 `admin.js` |
+| `worker/store.js` | 共用写入路径：`writeRow`（sha 乐观锁 + 历史行）、`applyOne`、`restoreAt`、`recordStatus`，路径规则，三方行合并 |
+| `worker/layers.js` | 分层：仓库 URL 归一化、`/v1/resolve` 与 submodule 归属、并入父项目、按层 pull、保留历史的移动、合并项目 |
+| `worker/migrations/` | 带版本号的 SQL 迁移（`NNN_name.sql`），由 `deploy.sh` 和自部署服务应用 |
+| `tools/migrate-layers.mjs` | 按 JSON 计划把已有的扁平记忆库搬进各层（默认只演练） |
+| `docs/design-cloud-v3.md` | 设计文档：已验证的事实、模型、算法、上线顺序、测试、限制 |
 | `worker/admin.js`、`worker/admin.html` | 管理后台：Access JWT 校验、自部署的登录 session 或代理 header 认证、`/admin/api/*`、单文件前端（EN/中文） |
 | `worker/memsync.py` | Hook 客户端（只用 Python 标准库），由 Worker 以 `/client/memsync.py` 公开提供，内容不含任何密钥 |
-| `worker/schema.sql` | D1 表结构（`files`、`history`、`sync_events`） |
+| `worker/schema.sql` | D1 表结构（`files`、`history`、`sync_events`、`schema_version`、`repo_membership`、`projects`） |
 | `deploy.sh` | 用 Cloudflare REST API 部署：D1、schema、Worker、可选的 Custom Domain |
 | `deploy.env.example` | 部署配置模板（复制为 `deploy.env`，该文件已被 gitignore） |
 | `setup-script.template.sh` | 环境 setup script 模板，`deploy.sh` 会填入你的 URL |
@@ -125,14 +151,14 @@ export CF_API_TOKEN=...     # 也可以写进 deploy.env
 
 ### 4. 验证
 
-在该环境里开一个新的 cloud session，让 Claude 记一件事（「记住我偏好 X」）。然后：
+在该环境里开一个新的 cloud session，让 Claude 记两件事：一件对所有项目生效（「所有项目都记住：我偏好 X」），一件关于当前仓库（「这个仓库提交前先跑 linter」）。然后：
 
 ```bash
 # 在该环境的任意 cloud session 里运行（代理会自动带上 token）
-curl -sS https://memory.example.com/v1/pull | jq -r '.files[] | "== \(.path)\n\(.content)"'
+curl -sS "https://memory.example.com/v1/pull?global=1&projects=github.com/owner/repo" | jq -r '.files[] | "== \(.path)\n\(.content)"'
 ```
 
-再开一个新会话，启动时就会加载这条记忆。同时看一下新会话的系统提示里有没有自动记忆的说明（指向 `/root/memory/`）；没有的话，说明开关没生效，见「排错」。
+第一件应该在 `global/CLAUDE.md` 里，第二件在 `projects/github.com/owner/repo/` 下。再开一个新会话，两件都会在启动时加载（全局那件在每个项目里都有，另一件只在这个仓库里有）。同时看一下新会话的系统提示里有没有自动记忆的说明（指向 `/root/memory/`）；没有的话，说明开关没生效，见「排错」。
 
 ## 自部署（备选）
 
@@ -270,20 +296,54 @@ docker compose -f selfhost/docker-compose.yml cp memory:/data/backup.db ./backup
 |---|---|
 | `GET /health` | 健康检查 |
 | `GET /client/memsync.py` | 下载 hook 客户端 |
-| `GET /v1/pull` | 全部现存记忆文件 `{files:[{path,content,sha,modified}]}` |
+| `GET /v1/pull` | **不带参数**：只返回旧版根目录的文件（v1/v2 客户端依赖这个行为）`{files:[{path,content,sha,modified}]}` |
+| `GET /v1/pull?projects=<pid>,<pid>&global=1` | `global/CLAUDE.md` 和这些项目的文件 |
+| `POST /v1/resolve` | `{repos:[{url, submodules:[url...]}]}` → 记录 submodule 归属，把后来才学到归属的项目并入父项目，返回 `{projects:[pid...], map:{url: pid}}` |
+| `POST /v1/move` | `{from, to}`：移动单个文件并保留历史；索引移到索引上会合并，其他重名返回 409 |
+| `POST /v1/move-prefix` | `{from_prefix, to_prefix}`（都以 `/` 结尾）：移动整个文件夹；重名文件加 `.2` 后缀，索引合并 |
 | `POST /v1/push` | `{session, files:[{path, content\|null, base_sha, added_lines?, removed_lines?}]}` |
 | `GET /v1/history?path=&limit=&content=1` | 修改历史 |
-| `POST /v1/status` | 客户端上报同步结果 `{session, event: pull\|push, ok, error, files, cli_version, auto_memory, cwd_name}`，写入 `sync_events`（只保留最新约 2000 条） |
+| `POST /v1/status` | 客户端上报同步结果 `{session, event: pull\|push, ok, error, files, cli_version, auto_memory, cwd_name, projects}`，写入 `sync_events`（只保留最新约 2000 条） |
 | `POST /v1/restore` `{at: 毫秒时间戳}` | 把全部文件恢复到该时间点的状态（恢复操作本身也会记入历史，可以撤销） |
 
-`sha` 是文件内容 UTF-8 的 SHA-256 十六进制值。路径只允许字母、数字和 `._-/`，以 `.md` 结尾，最长 200 个字符，不能含 `..`；单个文件上限 200 KB；每次 push 最多 500 个文件。
+`sha` 是文件内容 UTF-8 的 SHA-256 十六进制值。路径只允许字母、数字和 `._-/`，以 `.md` 结尾，最长 200 个字符，不能含 `..`；单个文件上限 200 KB；每次 push 最多 500 个文件。分层路径只有 `global/CLAUDE.md` 和 `projects/<host>/<owner>/<repo>/<file>.md`（或 `projects/_norepo/<file>.md`）两种，其他路径都是旧版根目录文件。push 时可以给新文件带上 `routed_by`，表示客户端是按兜底规则选的项目。
 
 规则：
 
 - **普通记忆文件。** 服务器上的版本和客户端的 `base_sha` 一致就直接写入；不一致时以后写的为准，旧版本保留在 `history` 里。
-- **`MEMORY.md`。** 冲突时服务器做三方行合并：保留其他会话加的行，删掉本客户端删掉的行，追加本客户端新增的行。合并结果会回写到本地。
+- **`MEMORY.md`（任意项目）和 `global/CLAUDE.md`。** 冲突时服务器做三方行合并：保留其他会话加的行，删掉本客户端删掉的行，追加本客户端新增的行。合并结果会回写到本地。
 - **删除。** 只有服务器版本没变过才删除；别的会话改过的话，保留修改后的版本，并恢复到本地。
 - **原子性。** 同一路径的写入带乐观锁（`WHERE sha = ?`），冲突时最多重试 4 次。
+
+## 迁移已有的扁平记忆库
+
+如果你之前用的是 v1/v2（所有项目共用一个记忆库），文件都在记忆库的根目录，在管理后台里显示为「旧版根目录」。`tools/migrate-layers.mjs` 按你写的计划把它们搬进各层。哪些内容算全局由你决定，工具不做判断。
+
+```json
+{
+  "global_claude_md": "- 用中文回复\n- 回答尽量简短\n",
+  "moves": [
+    {"from": "deploy.md", "to": "projects/github.com/acme/platform/deploy.md"},
+    {"from": "MEMORY.md", "to": "projects/github.com/acme/platform/MEMORY.md"}
+  ],
+  "drop": ["obsolete.md"],
+  "project_indexes": {"github.com/acme/platform": "- [Deploy](deploy.md) — 节点顺序\n"}
+}
+```
+
+- `global_claude_md`：全局 `CLAUDE.md` 的条目，不含 header；这些行会合并进已有内容。
+- `moves`：旧根目录文件 → 项目路径。移动保留历史。把 `MEMORY.md` 移到已有的项目索引上，会合并各行。
+- `project_indexes`：合并进某个项目 `MEMORY.md` 的索引行。
+- `drop`：要删除的旧文件（历史里仍能找回）。
+- 计划里没提到的旧文件留在原处，之后可以在管理后台里分类。
+
+```bash
+export MEMSYNC_URL=https://memory.example.com MEMSYNC_TOKEN=<访问 token>   # 在 cloud session 里不需要 token，但要用 NODE_USE_ENV_PROXY=1 运行 node
+node tools/migrate-layers.mjs plan.json            # 演练：打印每一次移动、合并的行和删除
+node tools/migrate-layers.mjs plan.json --apply    # 执行
+```
+
+上线顺序：（1）部署服务端（向后兼容），（2）更新每个环境的 setup script，（3）运行迁移，（4）在管理后台里分类剩下的文件。还停留在旧快照上的客户端，在快照过期之前继续使用旧版根目录的文件。
 
 ## 更新客户端
 
@@ -320,8 +380,8 @@ docker compose -f selfhost/docker-compose.yml cp memory:/data/backup.db ./backup
 在该环境的 cloud 会话里运行（代理会自动带 token），或者自己加 `-H "Authorization: Bearer $TOKEN"`：
 
 ```bash
-# 查看当前全部记忆
-curl -sS https://memory.example.com/v1/pull | jq -r '.files[] | "== \(.path)\n\(.content)"'
+# 查看全局记忆加某个项目的记忆（不带参数的 /v1/pull 只返回旧版根目录文件）
+curl -sS "https://memory.example.com/v1/pull?global=1&projects=github.com/owner/repo" | jq -r '.files[] | "== \(.path)\n\(.content)"'
 
 # 最近 20 次修改
 curl -sS "https://memory.example.com/v1/history?limit=20" | jq -c '.history[] | {path, deleted, session, at}'
@@ -339,13 +399,17 @@ curl -sS -X POST -d '{"at": 1790000000000}' https://memory.example.com/v1/restor
 - **依赖文档没写的行为。** `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0` 能在云端打开自动记忆，依据是 CLI 源码（设置了 `CLAUDE_CODE_REMOTE` 且没设置 `CLAUDE_CODE_REMOTE_MEMORY_DIR` 时默认关闭；值为 `0` 时强制开启）。以后的版本可能会变。如果哪天新会话里突然没有记忆了，按这个顺序排查：
   1. 看新会话的系统提示里还有没有自动记忆的说明（指向 `/root/memory/`）。没有的话，就是开关失效了。
   2. `cat /root/.claude/memsync/sync.log`，看有没有 `pull ok`。
-  3. `curl -sS https://<域名>/v1/pull | jq '.files|length'`，确认服务器上有数据；返回 401 说明 network secret 无效。
+  3. `curl -sS "https://<域名>/v1/pull?global=1" | jq '.files|length'`，确认服务器上有数据；返回 401 说明 network secret 无效。
   4. 开关失效时可以试的替代办法：在 `settings.json` 的 `env` 里设置 `CLAUDE_CODE_REMOTE_MEMORY_DIR`（源码里的另一个开关）；或者让 SessionStart hook 把 `/root/memory/MEMORY.md` `cat` 到 stdout（会作为上下文注入，上限 10,000 字符），再在 `~/.claude/CLAUDE.md` 里写上记忆的保存规则。
   5. 官方如果推出了云端记忆（CLI 源码里已经能看到还没上线的「memory stores」同步代码），可以把 D1 里的文件导出迁移过去，格式本来就是原生格式。
 
   数据都在 D1 里，客户端或开关出问题不会丢数据。
 - **auto-dream 在云端不会运行。** 原生的 auto-dream（后台整理）需要本地有若干个新的会话记录，而每个容器里只有当前这一个。`MEMORY.md` 只加载前 200 行或 25 KB，共用的记忆库需要不时整理。可以自己加一个定期任务：拉取，合并重复条目，删除过时条目，压缩索引，推送。建议的规则：只合并不删除；索引里每条记忆一行；索引控制在 150 行左右；整理错了用 `/v1/restore` 回滚。
-- **单用户设计。** 一个 token、一个共享记忆库，没有按用户隔离。不要把 token 或管理后台的 Access 策略共享给不该看到全部记忆的人。
+- **单用户设计。** 一个 token、一个记忆库，没有按用户隔离。不要把 token 或管理后台的 Access 策略共享给不该看到全部记忆的人。
+- **全局还是项目，取决于模型怎么落笔。** `CLAUDE.md` 里的 header 引导保存位置（Sonnet 的 4 条测试话术全部分对），但仍可能放错，放错了在管理后台里改。
+- **`CLAUDE.md` 没有 200 行上限。** 全局条目每条一行短句，定期清理。
+- **会话中途的修改不会重新渲染。** 一个会话里保存的记忆，从下一个会话开始出现在上下文里，和原生一致。
+- **嵌套的仓库路径**（超过 `owner/repo` 两级，例如 GitLab 子组）不会被识别为仓库，这样的会话按 `_norepo` 处理。
 - **不要在记忆里存密钥。** 记忆文件在 D1 里是明文，会显示在管理后台，也会加载进每个会话的上下文。
 - **Hook 不会打断会话。** `memsync.py` 任何失败都以 exit 0 结束，代价是同步问题只能通过上面的提示和面板看到。
 - **暂不支持本地 CLI 和桌面端。** 原生自动记忆在本地是能用的（官方 OAuth 登录和自定义 API 网关都一样），但同步客户端还没适配，见[开发计划](#开发计划)。
@@ -354,18 +418,18 @@ curl -sS -X POST -d '{"at": 1790000000000}' https://memory.example.com/v1/restor
 
 以下是计划中的功能，还没有实现：
 
-- **本地 Claude Code CLI 和桌面端（macOS、Linux、Windows）。** 自动记忆本身和登录方式无关（官方 OAuth 或自定义 API 网关都行），要改的只有同步客户端：
+- **本地 Claude Code CLI 和桌面端（macOS、Linux、Windows）。** 自动记忆本身和登录方式无关，要做的是同步客户端，以及和分层模型的对接：
   - `memsync.py` 跨平台：现在依赖 `fcntl`，默认目录是 `/root/memory`，hook 命令写死了 `python3`；Windows 的 transcript 里路径是 JSON 转义的，`auto_memory` 检测会误判；
+  - 把每个本地项目的原生记忆目录（`~/.claude/projects/<项目>/memory/`）对应到它的 `projects/<pid>` 层，并直接读取原生的 `~/.claude/CLAUDE.md`，不再用 hook 写出的副本；
   - 第一次拉取改成合并，不再按服务器镜像删除，保证本地已有的记忆不会丢；
-  - 迁移步骤：把已有的按项目记忆目录（`~/.claude/projects/<项目>/memory/`）合并到一个共用目录；
   - token 从环境变量或权限受限的 token 文件读取（本地没有出口代理帮忙注入）；
-  - 处理多个本地会话同时写同一个目录的情况。
+  - 处理多个本地会话同时写同一个目录的情况。本地的 SessionStart hook 和第一条 prompt 存在竞争，第一次拉取可能落后一个会话。
 - **给 claude.ai 聊天端用的 MCP 连接器**，让聊天端也能查同一份记忆。需要单独做一套 OAuth（自定义连接器不接受静态 bearer token）。
 
 ## 卸载
 
 1. 从每个环境里删掉 setup script（或其中 memsync 的部分），并删除 network secret。
-2. 需要的话先导出记忆：`curl -sS https://<域名>/v1/pull | jq -r '.files[] | "== \(.path)\n\(.content)"'`。
+2. 需要的话先导出记忆：`curl -sS "https://<域名>/v1/pull?global=1&projects=<pid>" | jq -r '.files[] | "== \(.path)\n\(.content)"'`（管理后台里能看到所有项目 id）。
 3. 在 Cloudflare 控制台删除 Worker、D1 数据库、自定义域名路由和 Access 应用。自部署的话执行 `docker compose -f selfhost/docker-compose.yml down -v`（会连数据 volume 一起删除，先做好备份）。
 
 ## 开发
@@ -373,7 +437,8 @@ curl -sS -X POST -d '{"at": 1790000000000}' https://memory.example.com/v1/restor
 ```bash
 npm install
 npm run check   # node --check + python -m py_compile
-npm test        # test.mjs（后台、Access JWT、API）+ test2.mjs（memsync.py 端到端），两种后端各跑一遍，
+npm test        # test.mjs（后台、Access JWT、API）+ test2.mjs（hook 提示）+ test4.mjs（分层接口、后台分层）
+                # + test5.mjs（客户端 v3，真实 git 仓库）+ test6.mjs（迁移工具），两种后端各跑一遍，
                 # 另加 test3.mjs（自部署的后台登录和代理 header）
 BACKEND=cf npm test     # 只跑 wrangler dev --local
 BACKEND=node npm test   # 只跑自部署服务

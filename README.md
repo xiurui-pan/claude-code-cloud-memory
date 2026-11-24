@@ -6,41 +6,63 @@ Persistent, cross-session memory for Claude Code **cloud sessions** (claude.ai/c
 
 > **Scope:** cloud sessions only for now. The local Claude Code CLI and desktop app are not supported yet; see [Roadmap](#roadmap).
 
-Cloud sessions run in a fresh container each time and ship with native auto-memory turned off. This project turns native auto-memory back on in the container and syncs the memory directory to your server: memory is pulled when a session starts and pushed when a reply finishes. The memory format, loading and write rules are exactly Claude Code's native ones, and one memory store is shared across all projects and sessions.
+Cloud sessions run in a fresh container each time and ship with native auto-memory turned off. This project turns native auto-memory back on in the container and syncs the memory directory to your server: memory is pulled when a session starts and pushed when a reply finishes. The memory format, loading and write rules are exactly Claude Code's native ones. Cloud sessions get the same two kinds of memory a local Claude Code has: per-project auto-memory, and global instructions in `~/.claude/CLAUDE.md` that apply to every project.
 
 Features:
 
-- Native auto-memory (`MEMORY.md` index + one `.md` file per memory), nothing custom on the model side.
-- Server with optimistic concurrency, per-file last-writer-wins, 3-way line merge for `MEMORY.md`, full history and restore.
-- Admin UI (browser) behind Cloudflare Access, or behind a token login when self-hosted: view, edit, create, delete, per-file history, whole-store rollback, sync-status panel. English and Chinese.
+- **Project memory**: native auto-memory (`MEMORY.md` index + one `.md` file per memory), stored per project. A session only sees the memory of its own project.
+- **Global memory**: `~/.claude/CLAUDE.md`, rendered at session start and synced back, loaded by Claude Code in every project. Nothing custom on the model side.
+- A superrepo and its submodules are one project, learned from `.gitmodules`; no configuration.
+- Server with optimistic concurrency, per-file last-writer-wins, 3-way line merge for every `MEMORY.md` and for the global `CLAUDE.md`, full history and restore.
+- Admin UI (browser) behind Cloudflare Access, or behind a token login when self-hosted: files grouped by layer (Global, each project, Legacy root), edit, create, delete, move between projects, merge projects, edit project membership, per-file history, whole-store rollback, sync-status panel. English and Chinese.
 - Runs on Cloudflare (recommended) or self-hosted (Docker or Node 22+, SQLite); both run the same `worker/*.js`.
 - The access token never appears in environment variables, URLs or repos (it is a cloud-environment network secret).
 - Errors are visible: hook `systemMessage` in the chat, the admin status panel, Workers Logs.
 
 ## How it works
 
+Two kinds of memory, as in a local Claude Code:
+
+| | Project memory | Global memory |
+|---|---|---|
+| Native counterpart | per-project auto-memory (`MEMORY.md` + topic files) | `~/.claude/CLAUDE.md` |
+| In the container | `/root/memory/`, only the current project's files | `/root/.claude/CLAUDE.md` = a short guidance header + your global entries |
+| On the server | `projects/<pid>/...` | `global/CLAUDE.md` |
+| Saved when | Claude saves a fact about the repo, service or deployment | you say "remember this for all projects", or state a working preference |
+
 ```
 new session starts (container prepared by your environment setup script)
   └─ SessionStart hook: memsync.py pull
-       GET https://<your-host>/v1/pull  →  files written to /root/memory/
-       └─ Claude Code loads /root/memory/MEMORY.md natively (first 200 lines / 25 KB)
+       1. find the session's git repos, POST /v1/resolve  →  project ids
+       2. GET /v1/pull?projects=<pid>&global=1
+       3. write /root/memory/ (this project only)  and  ~/.claude/CLAUDE.md (header + global body)
+       └─ Claude Code loads both natively on the first turn
 while working
-  └─ Claude writes memories by the native rules: one .md per memory (with frontmatter) + a MEMORY.md index line
+  └─ Claude saves by the native rules: a project fact → auto-memory; "remember for all projects" → CLAUDE.md
 after every reply (Stop hook) and at session end (SessionEnd hook)
-  └─ memsync.py push: POST the files that changed since the last sync to /v1/push
+  └─ memsync.py push: changed project files → projects/<pid>/..., CLAUDE.md body (header stripped) → global/CLAUDE.md
 
               ┌──────────────────────────── Claude cloud container ───────────────────────────┐
               │ ~/.claude/settings.json (written by setup script)                              │
               │   env: CLAUDE_CODE_DISABLE_AUTO_MEMORY=0, MEMSYNC_URL, MEMSYNC_DIR            │
               │   autoMemoryDirectory: /root/memory                                            │
               │   hooks: SessionStart pull · Stop push · SessionEnd push                       │
+              │ /root/memory/MEMORY.md + topics   ·   /root/.claude/CLAUDE.md                  │
               └───────────────┬────────────────────────────────────────────────────────────────┘
                               │ HTTPS (egress proxy adds  Authorization: Bearer <network secret>)
                               ▼
-                  Cloudflare Worker  ──  D1 (files, history, sync_events)
+                  Cloudflare Worker  ──  D1 (files, history, repo_membership, projects, sync_events)
                         ▲
         /admin (Cloudflare Access JWT)  ←  your browser
 ```
+
+**Make something global.** Cloud sessions have no `/memory` command, so the hook-written `CLAUDE.md` starts with a short header that tells Claude what belongs there: anything you ask it to remember for all projects, and your preferences about how it should work. Everything about one repo, service or deployment stays in auto-memory. Say "remember for all projects: reply in Chinese" and Claude edits `CLAUDE.md`; say "in this repo, update CHANGELOG before release" and it goes to the project's auto-memory. The header is added when `CLAUDE.md` is rendered and removed before it is pushed; the server stores only your entries. Keep each entry to one short line: `CLAUDE.md` has no 200-line cap, so every line costs context in every session.
+
+**Projects.** A project is identified by the git remote of its repo (`github.com/acme/platform`; https and ssh forms, `.git`, credentials and case are normalized away). A superrepo and its submodules are one project: when a session sees a repo with `.gitmodules`, the client reports the submodule URLs and the server remembers that `acme/api` and `acme/chat` belong to `acme/platform`. A later session that attaches only `acme/api` lands in the same project. A session outside any repo is the project `_norepo`. If a submodule had already collected memory under its own project before the membership was known, that memory moves into the parent project with its history. When a session spans several unrelated repos, all their memories are shown together and new files go to the repo of the shell's working directory (see [the design doc](docs/design-cloud-v3.md#8-several-projects-in-one-session)).
+
+**Admin layers.** The admin UI groups files as Global, one group per project (with its member repos), and Legacy root (data from before layers existed, until you classify it). You can move a file to another project, merge two projects, add a repo to a project or split one off. Files that a multi-project session had to route by a fallback rule are listed under Needs review.
+
+Memory written in a session appears in the next session, not in the running one (Claude Code reads `CLAUDE.md` and `MEMORY.md` once per session, the same as natively).
 
 ## Why this works in cloud sessions
 
@@ -49,7 +71,7 @@ These are the findings the design rests on. They come from reading the Claude Co
 - **The gate.** When `CLAUDE_CODE_REMOTE` is set (every cloud session) and `CLAUDE_CODE_REMOTE_MEMORY_DIR` is not, the CLI disables native auto-memory.
 - **The undocumented switch.** Setting `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0` takes the "force enable" branch and turns auto-memory on regardless of the gate. This is not in the documentation (see [Risks](#risks-and-limitations)).
 - **`settings.json` is honored.** The docs say cloud sessions do not read your user-level `~/.claude/settings.json`; that only means the file on your own machine is not carried up. A `~/.claude/settings.json` written *inside the container* by the environment setup script is read normally, and its `hooks`, `env` and `autoMemoryDirectory` all take effect.
-- **Timing.** The `MEMORY.md` written by the SessionStart hook is in place in time to be loaded on the first turn.
+- **Timing.** The host waits for SessionStart hooks. Both the `MEMORY.md` and the `~/.claude/CLAUDE.md` written by the hook are in the context of the first turn (measured, including with a 5 s sleep in the hook). Claude Code labels the file "user's private global instructions for all projects", as it does natively, and `@/abs/path` imports inside it work. A `CLAUDE.md` written by the setup script is overwritten by the hook's version. Edits made mid-session are not re-rendered into context.
 - **Network secret injection.** A "network secret" configured on the environment makes the egress proxy add `Authorization: Bearer <secret>` to requests for that host. Requests made from hooks go through the proxy, so `memsync.py` never holds the token. The proxy does not inject secrets while the setup script runs, which is why the client download endpoint (`/client/memsync.py`) is public and contains no secrets.
 - **Setup-script snapshot caching.** The result of the setup script is cached as a container snapshot for about 7 days, and the cache is rebuilt when the setup script (or the allowed network hosts) changes. So updating the client means changing the script; see [Updating the client](#updating-the-client).
 
@@ -57,11 +79,15 @@ These are the findings the design rests on. They come from reading the Claude Co
 
 | Path | Purpose |
 |---|---|
-| `worker/index.js` | Worker entry (the self-host server runs it unchanged): bearer auth, pull, push, history, restore, status; routes `/admin*` to `admin.js` |
-| `worker/store.js` | Shared write path: `writeRow` (sha optimistic lock + history row), `applyOne`, `restoreAt`, `recordStatus` |
+| `worker/index.js` | Worker entry (the self-host server runs it unchanged): bearer auth, pull, push, resolve, move, history, restore, status; routes `/admin*` to `admin.js` |
+| `worker/store.js` | Shared write path: `writeRow` (sha optimistic lock + history row), `applyOne`, `restoreAt`, `recordStatus`, path rules, 3-way line merge |
+| `worker/layers.js` | Layers: repo URL normalization, `/v1/resolve` and submodule membership, reparenting, layered pull, history-preserving moves, project merge |
+| `worker/migrations/` | Versioned SQL migrations (`NNN_name.sql`), applied by `deploy.sh` and the self-host server |
+| `tools/migrate-layers.mjs` | Moves an existing flat store into layers from a JSON plan (dry run by default) |
+| `docs/design-cloud-v3.md` | Design: verified facts, model, algorithms, rollout, tests, limits |
 | `worker/admin.js`, `worker/admin.html` | Admin UI: Access JWT verification, self-host login session or proxy-header auth, `/admin/api/*`, single-file frontend (EN/中文) |
 | `worker/memsync.py` | Hook client (Python standard library only). Served publicly at `/client/memsync.py`, contains no secrets |
-| `worker/schema.sql` | D1 schema (`files`, `history`, `sync_events`) |
+| `worker/schema.sql` | D1 schema (`files`, `history`, `sync_events`, `schema_version`, `repo_membership`, `projects`) |
 | `deploy.sh` | Deploys D1, schema, Worker and optional custom domain through the Cloudflare REST API |
 | `deploy.env.example` | Deployment settings template (copy to `deploy.env`, which is gitignored) |
 | `setup-script.template.sh` | Environment setup script template; `deploy.sh` fills in your URL |
@@ -125,14 +151,14 @@ Set `MEMSYNC_LANG=zh` at the top of the script for Chinese hook messages.
 
 ### 4. Verify
 
-Start a new cloud session in that environment and ask Claude to remember something ("remember that I prefer X"). Then:
+Start a new cloud session in that environment and ask Claude to remember something for all projects ("remember for all projects: I prefer X"), and something about the repo ("in this repo, run the linter before committing"). Then:
 
 ```bash
 # inside any cloud session of that environment (the proxy adds the token)
-curl -sS https://memory.example.com/v1/pull | jq -r '.files[] | "== \(.path)\n\(.content)"'
+curl -sS "https://memory.example.com/v1/pull?global=1&projects=github.com/owner/repo" | jq -r '.files[] | "== \(.path)\n\(.content)"'
 ```
 
-Start another session: the memory is loaded at the start. Also check that the system prompt of the new session mentions the auto-memory directory `/root/memory/`; if it does not, the switch did not take effect (see [Troubleshooting](#troubleshooting)).
+The first should be in `global/CLAUDE.md`, the second under `projects/github.com/owner/repo/`. Start another session: both are loaded at the start (the global one in every project, the other only in that repo). Also check that the system prompt of the new session mentions the auto-memory directory `/root/memory/`; if it does not, the switch did not take effect (see [Troubleshooting](#troubleshooting)).
 
 ## Self-hosting (alternative)
 
@@ -270,20 +296,54 @@ All endpoints except `/health` and `/client/memsync.py` require `Authorization: 
 |---|---|
 | `GET /health` | Health check |
 | `GET /client/memsync.py` | Download the hook client |
-| `GET /v1/pull` | All live files: `{files:[{path,content,sha,modified}]}` |
+| `GET /v1/pull` | **No params**: legacy root files only (what v1/v2 clients expect): `{files:[{path,content,sha,modified}]}` |
+| `GET /v1/pull?projects=<pid>,<pid>&global=1` | `global/CLAUDE.md` and the files of those projects |
+| `POST /v1/resolve` | `{repos:[{url, submodules:[url...]}]}` → records submodule membership, folds late-learned projects into the parent, returns `{projects:[pid...], map:{url: pid}}` |
+| `POST /v1/move` | `{from, to}`: move one file, history kept; an index onto an index is merged, any other collision is a 409 |
+| `POST /v1/move-prefix` | `{from_prefix, to_prefix}` (both end with `/`): move a folder; name collisions get a `.2` suffix, indexes are merged |
 | `POST /v1/push` | `{session, files:[{path, content\|null, base_sha, added_lines?, removed_lines?}]}` |
 | `GET /v1/history?path=&limit=&content=1` | Change history |
-| `POST /v1/status` | Client sync report `{session, event: pull\|push, ok, error, files, cli_version, auto_memory, cwd_name}`, stored in `sync_events` (latest ~2000 kept) |
+| `POST /v1/status` | Client sync report `{session, event: pull\|push, ok, error, files, cli_version, auto_memory, cwd_name, projects}`, stored in `sync_events` (latest ~2000 kept) |
 | `POST /v1/restore` `{at: epoch_ms}` | Restore all files to their state at that time (the restore itself is recorded in history and can be undone) |
 
-`sha` is the SHA-256 hex of the file's UTF-8 content. Paths: letters, digits and `._-/`, must end in `.md`, at most 200 characters, no `..`; files up to 200 KB; up to 500 files per push.
+`sha` is the SHA-256 hex of the file's UTF-8 content. Paths: letters, digits and `._-/`, must end in `.md`, at most 200 characters, no `..`; files up to 200 KB; up to 500 files per push. Layered paths are exactly `global/CLAUDE.md` and `projects/<host>/<owner>/<repo>/<file>.md` (or `projects/_norepo/<file>.md`); every other path is a legacy root file. A push may tag a new file with `routed_by` to mark that the client chose its project by a fallback rule.
 
 Rules:
 
 - **Normal memory files.** If the server version equals the client's `base_sha`, the write is applied. Otherwise the last writer wins and the older version stays in `history`.
-- **`MEMORY.md`.** On conflict the server does a 3-way line merge: it keeps lines other sessions added, removes lines this client removed, appends lines this client added. The merged result is written back to the local copy.
+- **`MEMORY.md` (any project) and `global/CLAUDE.md`.** On conflict the server does a 3-way line merge: it keeps lines other sessions added, removes lines this client removed, appends lines this client added. The merged result is written back to the local copy.
 - **Deletes.** A delete is applied only if the server version is unchanged. If another session edited the file, the edited version is kept and restored locally.
 - **Atomicity.** Writes to one path use an optimistic lock (`WHERE sha = ?`) and retry up to 4 times on conflict.
+
+## Migrating an existing flat store
+
+If you ran v1/v2 (one memory store for all projects), the files sit at the root of the store and show up as "Legacy root" in the admin UI. `tools/migrate-layers.mjs` moves them into layers from a plan you write. It does not decide what is global; you do.
+
+```json
+{
+  "global_claude_md": "- Reply in Chinese\n- Prefer short answers\n",
+  "moves": [
+    {"from": "deploy.md", "to": "projects/github.com/acme/platform/deploy.md"},
+    {"from": "MEMORY.md", "to": "projects/github.com/acme/platform/MEMORY.md"}
+  ],
+  "drop": ["obsolete.md"],
+  "project_indexes": {"github.com/acme/platform": "- [Deploy](deploy.md) — order of nodes\n"}
+}
+```
+
+- `global_claude_md`: entries for the global `CLAUDE.md`, header not included; lines are merged into what is already there.
+- `moves`: legacy root file → project path. Moves keep history. Moving `MEMORY.md` onto an existing project index merges the lines.
+- `project_indexes`: index lines merged into a project's `MEMORY.md`.
+- `drop`: legacy files to delete (history keeps them).
+- Legacy files the plan does not mention stay where they are, so you can classify them in the admin UI afterwards.
+
+```bash
+export MEMSYNC_URL=https://memory.example.com MEMSYNC_TOKEN=<access token>   # token not needed in a cloud session; run node with NODE_USE_ENV_PROXY=1 there
+node tools/migrate-layers.mjs plan.json            # dry run: prints every move, merged line and drop
+node tools/migrate-layers.mjs plan.json --apply    # execute
+```
+
+Rollout order: (1) deploy the server (backward compatible), (2) update the setup script in every environment, (3) run the migration, (4) classify the leftovers in the admin UI. Clients on a cached older snapshot keep using the legacy root files until the snapshot expires.
 
 ## Updating the client
 
@@ -320,8 +380,8 @@ Status panel badges:
 Run these in a cloud session of the environment (the proxy adds the token), or add `-H "Authorization: Bearer $TOKEN"`:
 
 ```bash
-# all current memories
-curl -sS https://memory.example.com/v1/pull | jq -r '.files[] | "== \(.path)\n\(.content)"'
+# all current memories: global + one project (a plain /v1/pull returns only the legacy root files)
+curl -sS "https://memory.example.com/v1/pull?global=1&projects=github.com/owner/repo" | jq -r '.files[] | "== \(.path)\n\(.content)"'
 
 # last 20 changes
 curl -sS "https://memory.example.com/v1/history?limit=20" | jq -c '.history[] | {path, deleted, session, at}'
@@ -339,12 +399,16 @@ curl -sS -X POST -d '{"at": 1790000000000}' https://memory.example.com/v1/restor
 - **Relies on undocumented behavior.** `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0` enabling auto-memory in the cloud comes from the CLI source (default off when `CLAUDE_CODE_REMOTE` is set and `CLAUDE_CODE_REMOTE_MEMORY_DIR` is not; value `0` forces it on). A future version may change it. If new sessions suddenly have no memory:
   1. Check whether the system prompt of a new session still has an auto-memory section pointing at `/root/memory/`. If not, the switch stopped working.
   2. `cat /root/.claude/memsync/sync.log` and look for `pull ok`.
-  3. `curl -sS https://<host>/v1/pull | jq '.files|length'` confirms data is on the server; a 401 means the network secret is invalid.
+  3. `curl -sS "https://<host>/v1/pull?global=1" | jq '.files|length'` confirms data is on the server; a 401 means the network secret is invalid.
   4. Alternatives if the switch is gone: set `CLAUDE_CODE_REMOTE_MEMORY_DIR` in the `settings.json` `env` (the other switch in the source); or have the SessionStart hook `cat /root/memory/MEMORY.md` to stdout (injected as context, capped at 10,000 characters) and put the saving rules in `~/.claude/CLAUDE.md`.
   5. If Anthropic ships first-party cloud memory (unreleased "memory stores" sync code is visible in the CLI source), export the files from D1 and move them; the format is the native one.
   Your data lives in D1, so a client or switch problem does not lose it.
 - **Auto-dream does not run in cloud.** Native auto-dream (background consolidation) requires a number of new local session transcripts, and each container only has the current one. Since `MEMORY.md` loads only its first 200 lines / 25 KB, a shared store needs occasional tidying. You can add your own periodic job (a scheduled task that pulls, merges duplicates, drops stale entries, compacts the index, pushes). Suggested rules: never delete, only merge; keep one line per memory in the index; keep the index under about 150 lines; rely on `/v1/restore` to undo a bad run.
-- **Single-user design.** One token, one shared memory store, no per-user separation. Do not share the token or the admin Access policy with people who should not see all memories.
+- **Single-user design.** One token, one memory store, no per-user separation. Do not share the token or the admin Access policy with people who should not see all memories.
+- **Global vs project routing depends on the model.** The header in `CLAUDE.md` steers saves (4 of 4 test utterances were routed correctly with Sonnet), but a misplaced entry is possible; fix it in the admin UI.
+- **`CLAUDE.md` has no 200-line cap.** Keep global entries to one short line each and prune them.
+- **Mid-session changes are not re-rendered.** A memory saved in one session is in context from the next session, as natively.
+- **Nested repo paths** (more than `owner/repo`, for example GitLab subgroups) are not recognized as repos; such a session counts as `_norepo`.
 - **Do not store secrets in memory.** Memory files are plain text in D1, shown in the admin UI and loaded into every session's context.
 - **Hooks never break a session.** `memsync.py` exits 0 on every failure; the cost is that a sync problem is visible only through the messages and panels above.
 - **Local CLI / desktop app not supported yet.** Native auto-memory works locally (with OAuth or an API gateway alike), but the sync client is not ready for it; see [Roadmap](#roadmap).
@@ -353,18 +417,18 @@ curl -sS -X POST -d '{"at": 1790000000000}' https://memory.example.com/v1/restor
 
 Planned, not implemented yet:
 
-- **Local Claude Code CLI and desktop app (macOS, Linux, Windows).** Auto-memory itself does not depend on the login method (OAuth or a custom API gateway), so only the sync client needs work:
+- **Local Claude Code CLI and desktop app (macOS, Linux, Windows).** Native auto-memory itself does not depend on the login method, so the work is the sync client and the mapping onto layers:
   - make `memsync.py` portable (it imports `fcntl`, defaults to `/root/memory`, and the hook command assumes `python3`; Windows also JSON-escapes paths in transcripts, which breaks `auto_memory` detection);
+  - map each local project's native memory directory (`~/.claude/projects/<project>/memory/`) onto its `projects/<pid>` layer, and read `~/.claude/CLAUDE.md` natively instead of a hook-written copy;
   - make the first pull merge instead of mirror, so existing local memory is never deleted;
-  - a migration step that merges existing per-project memory dirs (`~/.claude/projects/<project>/memory/`) into one shared directory;
   - read the token from an environment variable or a restricted token file (there is no egress proxy to inject it locally);
-  - handle several local sessions writing the same directory at once.
+  - handle several local sessions writing the same directory at once. Locally, SessionStart hooks race the first prompt, so the first pull may be one session behind.
 - **MCP connector for claude.ai chat**, so chat can query the same memories. It needs its own OAuth flow (custom connectors do not take a static bearer token).
 
 ## Uninstall
 
 1. Remove the setup script (or the memsync part of it) from each environment, and delete the network secret.
-2. Optionally export the memories first: `curl -sS https://<host>/v1/pull | jq -r '.files[] | "== \(.path)\n\(.content)"'`.
+2. Optionally export the memories first: `curl -sS "https://<host>/v1/pull?global=1&projects=<pid>" | jq -r '.files[] | "== \(.path)\n\(.content)"'` (the admin UI shows every project id).
 3. Delete the Worker, the D1 database, the custom domain route and the Access application in the Cloudflare dashboard. Self-hosted: `docker compose -f selfhost/docker-compose.yml down -v` (this also deletes the data volume, so take a backup first).
 
 ## Development
@@ -372,7 +436,8 @@ Planned, not implemented yet:
 ```bash
 npm install
 npm run check   # node --check + python -m py_compile
-npm test        # test.mjs (admin, Access JWT, API) + test2.mjs (memsync.py end to end) on both backends,
+npm test        # test.mjs (admin, Access JWT, API) + test2.mjs (hook messages) + test4.mjs (layers API, admin layers)
+                # + test5.mjs (client v3 on real git checkouts) + test6.mjs (migration tool) on both backends,
                 # plus test3.mjs (self-host admin login and proxy header)
 BACKEND=cf npm test     # only wrangler dev --local
 BACKEND=node npm test   # only the self-host server
