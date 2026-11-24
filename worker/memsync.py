@@ -502,6 +502,8 @@ def do_push(session, hook_in=None):
         if old and old["sha"] == sha(text):
             continue
         c = {"path": sp, "content": text, "base_sha": old["sha"] if old else None}
+        if not old:
+            c["on_conflict"] = "rename"  # another session may have created the same name meanwhile
         if rule:
             c["routed_by"] = rule
         changes.append(c)
@@ -530,10 +532,14 @@ def do_push(session, hook_in=None):
     PENDING[0] = len(changes)
     res = request("POST", "/v1/push", {"session": session, "files": changes})
     PENDING[0] = 0
-    problems, rerender = [], False
+    problems, rerender, moved = [], False, {}
     for r in res.get("results", []):
         sp, status = r.get("path"), r.get("status")
         rel = inverse.get(sp) or (sp if legacy else (sp or "").rsplit("/", 1)[-1])
+        if status == "renamed" and r.get("to") and sp in sent:
+            rename_local(layout, known, rel, r["to"], sent[sp], moved)
+            log(f"push {sp}: renamed to {r['to']}")
+            continue
         if status in ("written", "overwrote_remote", "noop") and sp in sent:
             known[sp] = base_entry(sent[sp], sp)
             if not is_merge(sp):
@@ -556,11 +562,50 @@ def do_push(session, hook_in=None):
             problems.append((str(sp), status))
     if rerender:
         write_local(INDEX, render_index(layout, known))
+    ours = {l for c in changes if c["path"].rsplit("/", 1)[-1] == INDEX for l in c.get("added_lines", [])}
+    relink = relink_index(moved, ours)
     base["v"] = 3
     save_base(base)
     write_json(LAYOUT, layout)
     log(f"push ok: {len(changes)} change(s)" + (f", {len(problems)} problem(s)" if problems else ""))
+    if relink:  # send the index lines that now link the renamed files
+        again = do_push(session, hook_in)
+        return {"changes": len(changes) + again["changes"], "problems": problems + again["problems"], "projects": layout["projects"]}
     return {"changes": len(changes), "problems": problems, "projects": layout["projects"]}
+
+
+def rename_local(layout, known, rel, to, text, moved):
+    """The server stored a new file under `to` because its name was taken. Rename the local copy to
+    match (keeping local and server names equal); `moved` collects old -> new local names."""
+    new = to.rsplit("/", 1)[-1]
+    known[to] = base_entry(text, to)
+    layout["files"].pop(rel, None)
+    if new == rel or (MEM / new).exists() or new in layout["files"]:
+        layout["files"][rel] = to  # keep the local name; layout maps it to the server name
+        return
+    try:
+        (MEM / rel).rename(MEM / new)
+    except OSError:
+        layout["files"][rel] = to
+        return
+    layout["files"][new] = to
+    moved[rel] = new
+
+
+def relink_index(moved, ours):
+    """Point the MEMORY.md lines this push added (`ours`) at renamed files; lines from other sessions
+    keep their links. True when MEMORY.md changed and needs another push."""
+    if not moved:
+        return False
+    try:
+        idx = (MEM / INDEX).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    fixed = "\n".join(link_rewrite(l, moved) if l in ours else l for l in idx.split("\n"))
+    if fixed == idx:
+        return False
+    write_local(INDEX, fixed)
+    return True
 
 
 # ---------- pull ----------
