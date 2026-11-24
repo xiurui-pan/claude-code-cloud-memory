@@ -13,7 +13,7 @@ import { start, up, BACKEND } from "./backend.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.join(HERE, "..", "worker", "memsync.py");
-const PORT = 8861, B = `http://127.0.0.1:${PORT}`;
+const PORT = 8961, B = `http://127.0.0.1:${PORT}`;
 const w = start({ port: PORT, state: path.join(HERE, ".state7"), vars: { TOKEN_SHA256: crypto.createHash("sha256").update("sekret").digest("hex") } });
 console.log("backend:", BACKEND);
 await up(PORT);
