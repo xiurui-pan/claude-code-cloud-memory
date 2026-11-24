@@ -26,7 +26,6 @@ Error visibility: failures are reported to the user as a hook JSON `systemMessag
 either empty or exactly one JSON object), and a small status event is POSTed to /v1/status
 (queued locally in STATE/status_queue.json when the server can't be reached).
 """
-import fcntl
 import glob
 import hashlib
 import json
@@ -39,7 +38,17 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+try:  # Windows
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 URL = os.environ.get("MEMSYNC_URL", "").strip().rstrip("/")  # no default: set by the setup script
 MEM = Path(os.environ.get("MEMSYNC_DIR", "/root/memory"))
@@ -682,7 +691,8 @@ def auto_memory_state(session, hook_in):
         path = max(files, key=os.path.getmtime) if files else None
     state = "unknown"
     if path:
-        needle = str(MEM).rstrip("/")
+        needle = str(MEM).rstrip("/\\")
+        needles = (needle, json.dumps(needle)[1:-1])  # transcripts JSON-escape Windows backslashes
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 for line in f:
@@ -693,7 +703,7 @@ def auto_memory_state(session, hook_in):
                     except ValueError:
                         continue
                     if d.get("type") == "attachment" and (d.get("attachment") or {}).get("type") == "prompt_snapshot":
-                        state = "true" if needle in line else "false"  # the latest snapshot wins
+                        state = "true" if any(n in line for n in needles) else "false"  # the latest snapshot wins
         except OSError:
             pass
     if state != "unknown":
@@ -707,7 +717,7 @@ def send_status(event, session, hook_in, ok, error, files, reachable, projects=N
         ev = {"session": session, "event": event, "ok": bool(ok), "error": error, "files": files,
               "cli_version": cli_version(session),
               "auto_memory": auto_memory_state(session, hook_in),
-              "cwd_name": os.path.basename((hook_in.get("cwd") or os.getcwd()).rstrip("/")) or None,
+              "cwd_name": re.split(r"[\\/]", (hook_in.get("cwd") or os.getcwd()).rstrip("\\/"))[-1] or None,
               "projects": projects or None,
               "at": int(time.time() * 1000)}
         queue = read_json(QUEUE, [])
@@ -766,6 +776,92 @@ def emit(cmd, hook_in, msg):
     print(json.dumps(out, ensure_ascii=False))
 
 
+# ---------- cross-platform lock ----------
+LOCK_PATH = None     # default STATE/lock; local mode uses one machine-wide lock file
+LOCK_TIMEOUT = None  # seconds to wait; None waits as long as it takes (cloud behaviour)
+
+
+class LockTimeout(Exception):
+    pass
+
+
+def _try_lock(fd):
+    """Non-blocking exclusive lock on an open file descriptor. True when acquired."""
+    if fcntl is not None and os.environ.get("MEMSYNC_LOCK_BACKEND") != "excl":
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+    if msvcrt is not None and os.environ.get("MEMSYNC_LOCK_BACKEND") != "excl":
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    return None  # no OS-level locking available: caller falls back to an O_EXCL lock file
+
+
+@contextmanager
+def file_lock(path, timeout=None):
+    """Exclusive inter-process lock held for the with-block: flock (POSIX), msvcrt.locking (Windows),
+    or an O_EXCL lock file (stale after 60 s) when neither exists. Raises LockTimeout after `timeout` seconds."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = None if timeout is None else time.time() + timeout
+    fd, excl = None, None
+    try:
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+        while True:
+            got = _try_lock(fd)
+            if got is None:
+                os.close(fd)
+                fd = None
+                excl = Path(str(path) + ".excl")
+                while True:
+                    try:
+                        os.close(os.open(str(excl), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                        break
+                    except FileExistsError:
+                        try:
+                            if time.time() - excl.stat().st_mtime > 60:
+                                excl.unlink()
+                                continue
+                        except OSError:
+                            pass
+                        if deadline is not None and time.time() > deadline:
+                            raise LockTimeout(str(path))
+                        time.sleep(0.05)
+                break
+            if got:
+                break
+            if deadline is not None and time.time() > deadline:
+                raise LockTimeout(str(path))
+            time.sleep(0.05)
+        yield
+    finally:
+        if fd is not None:
+            try:
+                if fcntl is not None and os.environ.get("MEMSYNC_LOCK_BACKEND") != "excl":
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                elif msvcrt is not None:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            os.close(fd)
+        if excl is not None:
+            try:
+                excl.unlink()
+            except OSError:
+                pass
+
+
+def dispatch(cmd, session, hook_in):
+    return do_pull(session, hook_in) if cmd == "pull" else do_push(session, hook_in)
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     hook_in = {}
@@ -790,12 +886,11 @@ def main():
         return 0
     try:
         STATE.mkdir(parents=True, exist_ok=True)
-        with (STATE / "lock").open("w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with file_lock(LOCK_PATH or STATE / "lock", LOCK_TIMEOUT):
             failed, err_code, err_text, reachable = False, None, "", True
             res = {"changes": 0, "problems": []}
             try:
-                res = do_pull(session, hook_in) if cmd == "pull" else do_push(session, hook_in)
+                res = dispatch(cmd, session, hook_in)
             except Exception as e:  # noqa: BLE001  a hook must never break the session
                 detail = e.read().decode("utf-8", "replace")[:200] if isinstance(e, urllib.error.HTTPError) else ""
                 log(f"{cmd} failed: {e!r} {detail}")
