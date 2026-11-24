@@ -520,6 +520,8 @@ def do_push(session, hook_in=None):
         c = {"path": sp, "content": text, "base_sha": old["sha"] if old else None}
         if not old:
             c["on_conflict"] = "rename"  # another session may have created the same name meanwhile
+            stem = os.path.splitext(rel)[0] + "."
+            c["avoid"] = sorted(n for n in local if n != rel and n.startswith(stem))  # a rename must stay free locally
         if rule:
             c["routed_by"] = rule
         changes.append(c)

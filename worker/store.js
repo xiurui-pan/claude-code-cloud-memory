@@ -141,16 +141,24 @@ async function baseContent(env, path, sha) {
   return row ? row.content : null;
 }
 
-// `projects/p/foo.md` -> the first `projects/p/foo.<n>.md` (n >= 2) with no live row.
-async function freePath(env, path) {
+// Store `content` under the first free `projects/p/foo.<n>.md` (n >= 2), skipping names in `avoid`
+// (file names the client holds locally but has not pushed). The write itself is the reservation:
+// INSERT ... DO NOTHING, or UPDATE of a deleted row guarded by its sha, so two sessions racing for
+// the same name end up on different ones. Returns the path, or null.
+async function writeRenamed(env, path, content, sha, avoid, session) {
   const slash = path.lastIndexOf("/") + 1;
   const dot = path.lastIndexOf(".");
   const stem = dot > slash ? path.slice(0, dot) : path, ext = dot > slash ? path.slice(dot) : "";
-  for (let n = 2; ; n++) {
+  const skip = new Set(Array.isArray(avoid) ? avoid.map(String) : []);
+  for (let n = 2, tries = 0; n < 1000 && tries < 20; n++) {
     const cand = `${stem}.${n}${ext}`;
-    const row = await env.DB.prepare("SELECT deleted FROM files WHERE path = ?").bind(cand).first();
-    if (!row || row.deleted) return cand;
+    if (skip.has(cand.slice(slash))) continue;
+    const row = await env.DB.prepare("SELECT path, content, sha, deleted FROM files WHERE path = ?").bind(cand).first();
+    if (row && !row.deleted) continue;
+    tries++;
+    if (await writeRow(env, cand, row, content, sha, 0, session, Date.now())) return cand;
   }
+  return null;
 }
 
 export async function writeRow(env, path, cur, content, sha, deleted, session, now) {
@@ -194,10 +202,9 @@ export async function applyOne(env, f, session) {
 
     if (f.on_conflict === "rename" && !base && liveSha !== null && !isMergePath(path)) {
       // A new file whose name another session took meanwhile: keep both, this one under a free name.
-      const to = await freePath(env, path);
-      const r = await applyOne(env, { path: to, content: f.content, base_sha: null }, session);
-      if (r.status === "retry_exhausted") return { path, status: r.status };
-      return { path, status: "renamed", to, sha: r.sha };
+      const to = await writeRenamed(env, path, f.content, sha, f.avoid, session);
+      if (!to) return { path, status: "retry_exhausted" };
+      return { path, status: "renamed", to, sha };
     }
 
     let content = f.content;

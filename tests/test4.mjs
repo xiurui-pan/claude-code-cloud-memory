@@ -137,6 +137,15 @@ await t("new file whose name is taken: stored under a free name when the client 
   assert.equal(r.results[0].status, "renamed"); assert.equal(r.results[0].to, D + "n.3.md");
   const same = await push([{ path: D + "n.md", content: "first\n", base_sha: null, on_conflict: "rename" }], "B");
   assert.equal(same.results[0].status, "noop"); // identical content is not a collision
+  // two sessions racing for the same free name land on different names, both kept
+  const [r1, r2] = await Promise.all(["race A\n", "race B\n"].map((c, i) => push([{ path: D + "n.md", content: c, base_sha: null, on_conflict: "rename" }], "R" + i)));
+  const tos = [r1.results[0].to, r2.results[0].to];
+  assert.notEqual(tos[0], tos[1], JSON.stringify(tos));
+  const live = Object.fromEntries((await pull("?projects=github.com/acme/rename")).map((f) => [f.path, f.content]));
+  assert.deepEqual(new Set([live[tos[0]], live[tos[1]]]), new Set(["race A\n", "race B\n"]));
+  // names the client holds locally (not yet pushed) are skipped
+  const av = await push([{ path: D + "n.md", content: "avoid\n", base_sha: null, on_conflict: "rename", avoid: ["n.6.md", "n.7.md"] }], "B");
+  assert.equal(av.results[0].to, D + "n.8.md");
   const old = await push([{ path: D + "n.md", content: "old client\n", base_sha: null }], "C");
   assert.equal(old.results[0].status, "overwrote_remote"); // without the flag: unchanged behaviour
 });
