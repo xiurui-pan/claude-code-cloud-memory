@@ -23,7 +23,8 @@ const sql = w.sql;
 const wipe = () => sql("DELETE FROM sync_events");
 const day = 864e5, ev = (o) => ({ session: "s", event: "pull", ok: true, error: null, files: 1, cli_version: "1.0.0", auto_memory: "unknown", cwd_name: "x", ...o });
 const mem = fs.mkdtempSync(os.tmpdir() + "/m-"), stt = fs.mkdtempSync(os.tmpdir() + "/s-");
-const run = (cmd, over = {}, st = stt, input = "{}") => { const e = { ...process.env, MEMSYNC_URL: B, MEMSYNC_DIR: mem, MEMSYNC_STATE: st, MEMSYNC_TOKEN: "sekret", CLAUDE_CODE_REMOTE_SESSION_ID: "tsess", HTTPS_PROXY: "", HTTP_PROXY: "", https_proxy: "", http_proxy: "", NO_PROXY: "*", ...over }; return spawnSync("python3", [path.join(HERE, "..", "worker", "memsync.py"), cmd], { input, env: e, encoding: "utf8" }); };
+const wsEmpty = fs.mkdtempSync(os.tmpdir() + "/ws-"), gfile = os.tmpdir() + "/gclaude-" + process.pid + ".md"; // no repo -> project _norepo
+const run = (cmd, over = {}, st = stt, input = "{}") => { const e = { ...process.env, MEMSYNC_URL: B, MEMSYNC_DIR: mem, MEMSYNC_STATE: st, MEMSYNC_TOKEN: "sekret", MEMSYNC_WORKSPACE: wsEmpty, MEMSYNC_GLOBAL_FILE: gfile, CLAUDE_CODE_REMOTE_SESSION_ID: "tsess", HTTPS_PROXY: "", HTTP_PROXY: "", https_proxy: "", http_proxy: "", NO_PROXY: "*", ...over }; return spawnSync("python3", [path.join(HERE, "..", "worker", "memsync.py"), cmd], { input, env: e, encoding: "utf8" }); };
 const dead = { MEMSYNC_URL: "http://127.0.0.1:1" };
 const tm = (f) => JSON.parse(fs.readFileSync(stt + "/notify.json", "utf8"));
 
