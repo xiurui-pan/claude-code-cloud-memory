@@ -1,0 +1,13 @@
+deploy.env
+.token*
+*.secret
+secrets/
+SECRET-*
+setup-script.rendered.sh
+*.tmp
+__pycache__/
+node_modules/
+tests/.state*/
+tests/.wrangler/
+.wrangler/
+tests/shots/

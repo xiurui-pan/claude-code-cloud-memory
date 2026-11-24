@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory admin</title>
+<style>
+:root{--bg:#fafaf9;--fg:#1c1917;--mut:#78716c;--card:#fff;--bd:#e7e5e4;--ac:#2563eb;--acfg:#fff;--dg:#dc2626;--wn:#fef3c7}
+@media (prefers-color-scheme:dark){:root{--bg:#161412;--fg:#e7e5e4;--mut:#a8a29e;--card:#1f1c1a;--bd:#3a3532;--ac:#60a5fa;--acfg:#0b1220;--dg:#f87171;--wn:#422f0a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+header{display:flex;gap:8px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--bd);flex-wrap:wrap}
+header h1{font-size:17px;margin:0;flex:1}
+main{display:grid;grid-template-columns:320px 1fr;gap:0;min-height:calc(100vh - 56px)}
+#list{border-right:1px solid var(--bd);padding:12px;overflow:auto;max-height:calc(100vh - 56px)}
+#detail{padding:12px 16px;min-width:0}
+button,select,input,textarea{font:inherit;color:inherit}
+button{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:5px 12px;cursor:pointer}
+button.pri{background:var(--ac);color:var(--acfg);border-color:var(--ac)}
+button.dg{color:var(--dg);border-color:var(--dg)}
+button:disabled{opacity:.5;cursor:default}
+input,select,textarea{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:6px 8px;width:100%}
+textarea{min-height:55vh;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;resize:vertical}
+.row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center}
+.grp{font-size:12px;color:var(--mut);margin:12px 0 4px;text-transform:uppercase}
+.item{padding:8px;border:1px solid var(--bd);border-radius:6px;background:var(--card);margin-bottom:6px;cursor:pointer}
+.item.sel{border-color:var(--ac)}
+.item b{display:block;word-break:break-all}
+.item small{color:var(--mut);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mut{color:var(--mut);font-size:13px}
+.banner{background:var(--wn);padding:8px 12px;border-radius:6px;margin-bottom:8px}
+.hist{border:1px solid var(--bd);border-radius:6px;background:var(--card);padding:8px;margin-top:12px}
+.hist .h{display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--bd);flex-wrap:wrap}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:8px;max-height:40vh;overflow:auto;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 16px;border-radius:8px;display:none;max-width:90vw}
+.back{display:none}
+#bLang{min-width:3.2em}
+#status{display:none;padding:12px 16px;max-width:960px}
+body.st main{display:none}
+body.st #status{display:block}
+.badge{display:block;padding:8px 12px;border-radius:6px;margin-bottom:6px;border:1px solid var(--bd);border-left-width:6px}
+.badge.red{border-left-color:var(--dg);background:var(--card)}
+.badge.yellow{border-left-color:#d97706;background:var(--wn)}
+.badge.green{border-left-color:#16a34a;background:var(--card)}
+.tw{overflow-x:auto;border:1px solid var(--bd);border-radius:6px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--bd);white-space:nowrap}
+td.bad{color:var(--dg)}
+#status h2{font-size:15px;margin:16px 0 6px}
+@media (max-width:760px){
+ main{grid-template-columns:1fr}
+ #list{max-height:none;border-right:0}
+ body.open #list{display:none}
+ body:not(.open) #detail{display:none}
+ .back{display:inline-block}
+}
+</style>
+</head>
+<body>
+<header>
+ <h1 data-i="title"></h1>
+ <button id="bNew" data-i="new"></button>
+ <button id="bRestoreAll" data-i="restoreAll"></button>
+ <button id="bStatus"></button>
+ <button id="bReload" data-i="reload"></button>
+ <button id="bLang" title="Language / 语言"></button>
+</header>
+<main>
+ <section id="list">
+  <input id="q" type="search" data-ph="search">
+  <div class="row" style="margin-top:8px"><select id="ft"></select></div>
+  <div id="files"></div>
+ </section>
+ <section id="detail"></section>
+</main>
+<section id="status"></section>
+<div id="toast"></div>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+// ---------- i18n (en / zh) ----------
+const I18N={
+ en:{
+  title:"Memory admin",new:"New",restoreAll:"Restore all…",status:"Sync status",backToMem:"Back to memory",reload:"Reload",
+  search:"Search path, name, description…",allTypes:"All types",noType:"(no type)",pickFile:"Select a file on the left.",
+  noMatch:"No matching files.",openFail:"Failed to open: ",back:"← Back",pathPh:"file name, e.g. feedback_xxx.md",
+  addIdx:"Also append an index line to the end of MEMORY.md",save:"Save",del:"Delete",hist:"History",newFile:"New file",
+  typePrompt:"Type (%s):",saved:"Saved",saveFail:"Save failed: ",idxConflict:"MEMORY.md update conflict",
+  conflictBanner:"This file was changed by someone else. Your unsaved text is shown below; the base was moved to the latest version, so saving again will overwrite their change (the old version stays in History).",
+  existsRename:"That file already exists, pick another name",deletedToast:"The file was deleted",
+  confirmDel:"Delete %s? (it can still be restored from History)",deleted:"Deleted",deletedMsg:"Deleted.",
+  modified:"The file was modified, reloaded",delFail:"Delete failed: ",loading:"Loading…",versions:"Versions",view:"View",
+  histFail:"Failed to load history: ",deletedTag:"deleted",deletedRec:"This version is a deletion record",deletedParen:"(deleted)",
+  restoreVer:"Restore this version",confirmRestore:"Restore %s to the version from %s?",restored:"Restored",
+  restoredDeleted:"Restored to the deleted state.",restoreFail:"Restore failed: ",
+  health:"Health",ok:"OK",warn:"Warning",bad:"Problem",lastOk:"Last success: ",failStreak:"Consecutive failures: ",none:"none",
+  cliVer:"Claude Code versions",firstSeen:"First seen",lastSeen:"Last seen",count:"Count",noRecords:"No records",
+  recent:"Last 20 sync events",time:"Time",kind:"Kind",result:"Result",error:"Error",files:"Files",version:"Version",
+  autoMem:"Auto-memory",dir:"Directory",pull:"pull",push:"push",success:"ok",failure:"failed",
+  statusFail:"Failed to load status: ",newBadge:"new file",
+  restorePrompt:"Restore the whole memory store to which point in time? Format: 2026-01-15 15:30 (local time)",
+  badTime:"Invalid time format",confirmRestoreAll:"Roll all files back to %s? Files created since then will be deleted; the rollback itself is recorded in history and can be undone.",
+  rolledBack:"Rolled back %s file(s)",rolledMsg:"Rolled back.",rollFail:"Rollback failed: ",loadFail:"Failed to load: ",
+  h_sync_failing:"Sync failed %n times in a row with no success since (last error: %error)",
+  h_auto_memory_off:"%n report(s) in the last 7 days show native auto-memory is disabled; new sessions may neither read nor write memory",
+  h_no_events:"No sync events recorded yet",h_no_recent_events:"No sync events received for more than 3 days",
+  h_cli_upgraded:"Claude Code upgraded to %version; verify memory still works in a new session",h_ok:"Sync is healthy",
+ },
+ zh:{
+  title:"记忆库管理",new:"新建",restoreAll:"整体回滚…",status:"同步状态",backToMem:"返回记忆库",reload:"刷新",
+  search:"搜索路径、名称、描述…",allTypes:"全部类型",noType:"(无类型)",pickFile:"从左侧选择一个文件。",
+  noMatch:"没有匹配的文件。",openFail:"打开失败：",back:"← 返回",pathPh:"文件名，如 feedback_xxx.md",
+  addIdx:"同时在 MEMORY.md 末尾追加一行索引",save:"保存",del:"删除",hist:"历史版本",newFile:"新文件",
+  typePrompt:"类型（%s）：",saved:"已保存",saveFail:"保存失败：",idxConflict:"MEMORY.md 更新冲突",
+  conflictBanner:"文件已被其他人修改。下方是你的未保存内容；已把基准更新为最新版本，再点保存会覆盖对方的修改（旧版本可在历史里找回）。",
+  existsRename:"该文件已存在，请换个文件名",deletedToast:"文件已被删除",
+  confirmDel:"确定删除 %s？（历史里仍可恢复）",deleted:"已删除",deletedMsg:"已删除。",
+  modified:"文件已被修改，已重新加载",delFail:"删除失败：",loading:"加载中…",versions:"历史版本",view:"查看",
+  histFail:"历史加载失败：",deletedTag:"已删除",deletedRec:"此版本为删除记录",deletedParen:"(已删除)",
+  restoreVer:"恢复此版本",confirmRestore:"把 %s 恢复到 %s 的版本？",restored:"已恢复",
+  restoredDeleted:"已恢复为删除状态。",restoreFail:"恢复失败：",
+  health:"健康状况",ok:"正常",warn:"注意",bad:"异常",lastOk:"最近一次成功：",failStreak:"连续失败：",none:"无",
+  cliVer:"Claude Code 版本",firstSeen:"首次出现",lastSeen:"最近出现",count:"次数",noRecords:"暂无记录",
+  recent:"最近 20 条同步记录",time:"时间",kind:"类型",result:"结果",error:"错误",files:"文件数",version:"版本",
+  autoMem:"自动记忆",dir:"目录",pull:"拉取",push:"推送",success:"成功",failure:"失败",
+  statusFail:"状态加载失败：",newBadge:"新文件",
+  restorePrompt:"回滚整个记忆库到哪个时间点？格式：2026-01-15 15:30（本地时间）",
+  badTime:"时间格式不对",confirmRestoreAll:"把所有文件回滚到 %s？此后新增的文件会被删除；回滚本身也会进历史，可以再撤销。",
+  rolledBack:"已回滚 %s 个文件",rolledMsg:"已回滚。",rollFail:"回滚失败：",loadFail:"加载失败：",
+  h_sync_failing:"同步连续失败 %n 次，之后没有成功记录（最近错误：%error）",
+  h_auto_memory_off:"最近 7 天有 %n 次上报显示原生自动记忆未启用，新会话可能读不到也写不进记忆",
+  h_no_events:"还没有任何同步记录",h_no_recent_events:"超过 3 天没有收到同步记录",
+  h_cli_upgraded:"Claude Code 升级到 %version，请确认新会话里记忆仍然生效",h_ok:"同步正常",
+ }
+};
+let LANG="en";
+try{const s=localStorage.getItem("memadmin.lang");if(s==="zh"||s==="en")LANG=s;else LANG=/^zh/i.test(navigator.language||"")?"zh":"en"}
+catch{LANG=/^zh/i.test(navigator.language||"")?"zh":"en"}
+// t("key", a, b) replaces %s in order; t("key", {n:1}) replaces %n style named placeholders.
+function t(k,...a){
+  let s=(I18N[LANG][k]??I18N.en[k]??k);
+  if(a.length===1&&a[0]&&typeof a[0]==="object")return s.replace(/%(\w+)/g,(m,n)=>n in a[0]?a[0][n]:m);
+  let i=0;return s.replace(/%s/g,()=>a[i++]);
+}
+const fmt=ts=>new Date(ts).toLocaleString(LANG==="zh"?"zh-CN":"en-GB",{hour12:false});
+function applyLang(){
+  document.documentElement.lang=LANG==="zh"?"zh-CN":"en";
+  document.title=t("title");
+  document.querySelectorAll("[data-i]").forEach(e=>e.textContent=t(e.dataset.i));
+  document.querySelectorAll("[data-ph]").forEach(e=>e.placeholder=t(e.dataset.ph));
+  $("#bLang").textContent=LANG==="zh"?"EN":"中文";
+  $("#bStatus").textContent=document.body.classList.contains("st")?t("backToMem"):t("status");
+}
+
+const TYPES=["user","feedback","project","reference"];
+let files=[],cur=null; // cur: {path,sha,content,isNew}
+
+async function api(path,opt={}){
+  const o={method:opt.method||"GET",headers:{}};
+  if(opt.body!==undefined){o.headers["content-type"]="application/json";o.body=JSON.stringify(opt.body)}
+  const r=await fetch("/admin/api"+path,o);
+  let d={};try{d=await r.json()}catch{}
+  if(!r.ok){const e=new Error(d.error||r.status);e.status=r.status;e.data=d;throw e}
+  return d;
+}
+let tt;function toast(m){const e=$("#toast");e.textContent=m;e.style.display="block";clearTimeout(tt);tt=setTimeout(()=>e.style.display="none",3000)}
+
+async function loadList(){
+  const d=await api("/files");files=d.files;
+  renderTypeFilter();renderList();
+}
+function renderTypeFilter(){
+  const types=[...new Set(files.map(f=>f.type||""))].sort();
+  const sel=$("#ft"),v=sel.value;
+  sel.innerHTML=`<option value="">${esc(t("allTypes"))}</option>`+types.map(x=>`<option value="${esc(x)}">${esc(x||t("noType"))}</option>`).join("");
+  sel.value=types.includes(v)?v:"";
+}
+function renderList(){
+  const q=$("#q").value.trim().toLowerCase(),ft=$("#ft").value;
+  const groups={};
+  for(const f of files){
+    const g=f.type||"";
+    if(ft&&g!==ft)continue;
+    if(q&&!(f.path+" "+f.name+" "+f.description).toLowerCase().includes(q))continue;
+    (groups[g]=groups[g]||[]).push(f);
+  }
+  let h="";
+  for(const g of Object.keys(groups).sort()){
+    h+=`<div class="grp">${esc(g||t("noType"))} (${groups[g].length})</div>`;
+    for(const f of groups[g])h+=`<div class="item${cur&&cur.path===f.path?" sel":""}" data-p="${esc(f.path)}"><b>${esc(f.name||f.path)}</b><small>${esc(f.name?f.path+" · ":"")}${esc(f.description||"")}</small><small>${fmt(f.modified)} · ${f.size} B</small></div>`;
+  }
+  $("#files").innerHTML=h||`<p class="mut">${esc(t("noMatch"))}</p>`;
+}
+$("#files").onclick=e=>{const it=e.target.closest(".item");if(it)openFile(it.dataset.p)};
+$("#q").oninput=renderList;$("#ft").onchange=renderList;
+
+async function openFile(path){
+  try{
+    const d=await api("/file?path="+encodeURIComponent(path));
+    cur={path:d.path,sha:d.sha,content:d.content,isNew:false};
+    renderDetail();renderList();
+  }catch(e){toast(t("openFail")+e.message);loadList()}
+}
+function renderDetail(banner){
+  document.body.classList.add("open");
+  const c=cur;
+  $("#detail").innerHTML=`
+  <div class="row"><button class="back" id="bBack">${esc(t("back"))}</button>
+   ${c.isNew?`<input id="dPath" value="${esc(c.path)}" placeholder="${esc(t("pathPh"))}" style="flex:1">`:`<b style="flex:1;word-break:break-all">${esc(c.path)}</b>`}</div>
+  ${banner?`<div class="banner">${esc(banner)}</div>`:""}
+  <textarea id="ed" spellcheck="false"></textarea>
+  ${c.isNew&&c.path!=="MEMORY.md"?`<label class="row mut"><input type="checkbox" id="addIdx" checked style="width:auto"> ${esc(t("addIdx"))}</label>`:""}
+  <div class="row"><button class="pri" id="bSave">${esc(t("save"))}</button>
+   ${c.isNew?"":`<button class="dg" id="bDel">${esc(t("del"))}</button><button id="bHist">${esc(t("hist"))}</button>`}
+   <span class="mut" id="meta"></span></div>
+  <div id="hist"></div>`;
+  $("#ed").value=c.content;
+  $("#meta").textContent=c.isNew?t("newFile"):"sha "+c.sha.slice(0,8);
+  $("#bBack").onclick=()=>document.body.classList.remove("open");
+  $("#bSave").onclick=save;
+  if(!c.isNew){$("#bDel").onclick=del;$("#bHist").onclick=showHist}
+}
+function showPlaceholder(key){$("#detail").innerHTML=`<p class="mut">${esc(t(key))}</p>`}
+function newFile(){
+  const ty=prompt(t("typePrompt",TYPES.join(" / ")),"feedback");
+  if(!ty)return;
+  cur={path:"",sha:null,isNew:true,content:`---\nname: \ndescription: \nmetadata:\n  type: ${ty.trim()}\n---\n`};
+  renderDetail();
+}
+async function save(){
+  const content=$("#ed").value;
+  let path=cur.path;
+  if(cur.isNew){
+    path=$("#dPath").value.trim();
+    if(!path.endsWith(".md"))path+=".md";
+  }
+  const btn=$("#bSave");btn.disabled=true;
+  try{
+    await api("/file",{method:"PUT",body:{path,content,base_sha:cur.sha}});
+    if(cur.isNew&&$("#addIdx")&&$("#addIdx").checked){
+      const fm=(content.match(/^name:\s*(.*)$/m)||[])[1]||path;
+      const ds=(content.match(/^description:\s*(.*)$/m)||[])[1]||"";
+      const line=`- [${fm.trim()||path}](${path})${ds.trim()?" — "+ds.trim():""}`;
+      await appendIndex(line);
+    }
+    toast(t("saved"));
+    await loadList();await openFile(path);
+  }catch(e){
+    if(e.status===409){
+      renderDetailConflict(content,e.data);
+    }else{toast(t("saveFail")+e.message);btn.disabled=false}
+  }
+}
+async function appendIndex(line){
+  for(let i=0;i<3;i++){
+    let base=null,text="";
+    try{const d=await api("/file?path=MEMORY.md");base=d.sha;text=d.content}catch(e){if(e.status!==404)throw e}
+    if(text&&!text.endsWith("\n"))text+="\n";
+    try{await api("/file",{method:"PUT",body:{path:"MEMORY.md",content:text+line+"\n",base_sha:base}});return}
+    catch(e){if(e.status!==409)throw e}
+  }
+  throw new Error(t("idxConflict"));
+}
+function renderDetailConflict(mine,remote){
+  // Someone else changed it: keep my text visible, switch base to the remote version.
+  const c=cur;
+  if(c.isNew){toast(t("existsRename"));return}
+  renderDetail(t("conflictBanner"));
+  $("#ed").value=mine;cur.sha=remote.sha;cur.content=remote.content;
+  if(remote.sha===null||remote.sha===undefined){toast(t("deletedToast"));}
+  $("#meta").textContent="sha "+String(remote.sha||"").slice(0,8);
+}
+async function del(){
+  if(!confirm(t("confirmDel",cur.path)))return;
+  try{await api("/file?path="+encodeURIComponent(cur.path)+"&base_sha="+cur.sha,{method:"DELETE"});toast(t("deleted"));cur=null;showPlaceholder("deletedMsg");await loadList()}
+  catch(e){if(e.status===409){toast(t("modified"));openFile(cur.path)}else toast(t("delFail")+e.message)}
+}
+async function showHist(){
+  const box=$("#hist");box.innerHTML=`<div class="hist mut">${esc(t("loading"))}</div>`;
+  try{
+    const d=await api("/history?path="+encodeURIComponent(cur.path));
+    box.innerHTML=`<div class="hist"><b>${esc(t("versions"))}</b>`+d.history.map(h=>`<div class="h"><span>${fmt(h.at)}</span><span class="mut">${esc(h.session||"-")}${h.deleted?" · "+esc(t("deletedTag")):" · "+h.size+" B"}</span><button data-v="${h.id}">${esc(t("view"))}</button></div>`).join("")+'<div id="ver"></div></div>';
+    box.onclick=e=>{const b=e.target.closest("button[data-v]");if(b)showVer(b.dataset.v)};
+  }catch(e){box.innerHTML="";toast(t("histFail")+e.message)}
+}
+async function showVer(id){
+  const v=await api("/version?id="+id);
+  $("#ver").innerHTML=`<p class="mut">${fmt(v.at)} · ${esc(v.session||"-")}${v.deleted?" · "+esc(t("deletedRec")):""}</p><pre>${esc(v.deleted?t("deletedParen"):v.content)}</pre><button class="pri" id="bRes">${esc(t("restoreVer"))}</button>`;
+  $("#bRes").onclick=async()=>{
+    if(!confirm(t("confirmRestore",cur.path,fmt(v.at))))return;
+    try{await api("/restore-file",{method:"POST",body:{path:cur.path,id:v.id,base_sha:cur.sha}});toast(t("restored"));await loadList();
+      if(v.deleted){cur=null;showPlaceholder("restoredDeleted")}else await openFile(cur.path)}
+    catch(e){if(e.status===409){toast(t("modified"));openFile(cur.path)}else toast(t("restoreFail")+e.message)}
+  };
+}
+$("#bStatus").onclick=()=>{
+  const on=document.body.classList.toggle("st");
+  applyLang();
+  if(on)loadStatus();
+};
+let lastStatus=null;
+async function loadStatus(){
+  const box=$("#status");box.innerHTML=`<p class="mut">${esc(t("loading"))}</p>`;
+  try{lastStatus=await api("/status");renderStatus()}
+  catch(e){box.innerHTML="";toast(t("statusFail")+e.message)}
+}
+function renderStatus(){
+  const d=lastStatus,box=$("#status");if(!d)return;
+  const rel=ts=>ts?fmt(ts):t("none");
+  const lvl={red:t("bad"),yellow:t("warn"),green:t("ok")};
+  const hmsg=h=>{const k="h_"+h.code;return I18N.en[k]?t(k,h.params||{}):h.message};
+  box.innerHTML=
+   `<h2>${esc(t("health"))}</h2>`+d.health.map(h=>`<div class="badge ${esc(h.level)}"><b>${esc(lvl[h.level]||"")}</b> ${esc(hmsg(h))}</div>`).join("")+
+   `<p class="mut">${esc(t("lastOk"))}${rel(d.last_success)} · ${esc(t("failStreak"))}${d.consecutive_failures}</p>`+
+   `<h2>${esc(t("cliVer"))}</h2>`+(d.versions.length?`<div class="tw"><table><tr><th>${esc(t("version"))}</th><th>${esc(t("firstSeen"))}</th><th>${esc(t("lastSeen"))}</th><th>${esc(t("count"))}</th></tr>`+
+     d.versions.map(v=>`<tr><td>${esc(v.version)}</td><td>${fmt(v.first_seen)}</td><td>${fmt(v.last_seen)}</td><td>${v.n}</td></tr>`).join("")+'</table></div>':`<p class="mut">${esc(t("noRecords"))}</p>`)+
+   `<h2>${esc(t("recent"))}</h2>`+(d.recent.length?`<div class="tw"><table><tr><th>${esc(t("time"))}</th><th>${esc(t("kind"))}</th><th>${esc(t("result"))}</th><th>${esc(t("error"))}</th><th>${esc(t("files"))}</th><th>${esc(t("version"))}</th><th>${esc(t("autoMem"))}</th><th>${esc(t("dir"))}</th></tr>`+
+     d.recent.map(e=>`<tr><td>${fmt(e.at)}</td><td>${esc(e.event==="pull"?t("pull"):t("push"))}</td><td class="${e.ok?"":"bad"}">${esc(e.ok?t("success"):t("failure"))}</td><td>${esc(e.error||"")}</td><td>${e.files??""}</td><td>${esc(e.cli_version||"")}</td><td>${esc(e.auto_memory||"")}</td><td>${esc(e.cwd_name||"")}</td></tr>`).join("")+'</table></div>':`<p class="mut">${esc(t("noRecords"))}</p>`);
+}
+$("#bNew").onclick=newFile;
+$("#bReload").onclick=()=>{if(document.body.classList.contains("st"))return loadStatus();loadList().then(()=>cur&&!cur.isNew&&openFile(cur.path))};
+$("#bRestoreAll").onclick=async()=>{
+  const s=prompt(t("restorePrompt"));
+  if(!s)return;
+  const at=new Date(s.replace(" ","T")).getTime();
+  if(!isFinite(at)){toast(t("badTime"));return}
+  if(!confirm(t("confirmRestoreAll",fmt(at))))return;
+  try{const r=await api("/restore",{method:"POST",body:{at}});toast(t("rolledBack",r.changed.length));cur=null;showPlaceholder("rolledMsg");await loadList()}
+  catch(e){toast(t("rollFail")+e.message)}
+};
+$("#bLang").onclick=()=>{
+  const ed=$("#ed"),dp=$("#dPath"),draft=ed?ed.value:null,draftPath=dp?dp.value:null; // keep unsaved edits
+  LANG=LANG==="zh"?"en":"zh";
+  try{localStorage.setItem("memadmin.lang",LANG)}catch{}
+  applyLang();
+  renderTypeFilter();renderList();
+  if(cur){renderDetail();if(draft!==null)$("#ed").value=draft;if(draftPath!==null&&$("#dPath"))$("#dPath").value=draftPath}
+  else showPlaceholder("pickFile");
+  renderStatus();
+};
+applyLang();showPlaceholder("pickFile");
+loadList().catch(e=>toast(t("loadFail")+e.message));
+</script>
+</body>
+</html>

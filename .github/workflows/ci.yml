@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Syntax checks
+        run: |
+          for f in worker/index.js worker/store.js worker/admin.js tests/test.mjs tests/test2.mjs tests/run.mjs; do node --check "$f"; done
+          python -m py_compile worker/memsync.py
+          bash -n deploy.sh
+          bash -n setup-script.template.sh
+          awk 'length > 200 { print FILENAME ": line " NR " is longer than 200 chars"; bad = 1 } END { exit bad }' setup-script.template.sh
+      - run: npm install --no-audit --no-fund
+      - name: Tests (wrangler dev --local)
+        run: npm test

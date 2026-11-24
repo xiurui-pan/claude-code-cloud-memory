@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, content TEXT NOT NULL, sha TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, modified INTEGER NOT NULL, session TEXT);
+CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL, content TEXT NOT NULL, sha TEXT NOT NULL, deleted INTEGER NOT NULL, session TEXT, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS history_path_at ON history (path, at);
+CREATE INDEX IF NOT EXISTS history_at ON history (at);
+CREATE TABLE IF NOT EXISTS sync_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, session TEXT, event TEXT, ok INTEGER, error TEXT, files INTEGER, cli_version TEXT, auto_memory TEXT, cwd_name TEXT);
+CREATE INDEX IF NOT EXISTS sync_events_at ON sync_events (at);

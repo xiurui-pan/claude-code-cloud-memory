@@ -1,0 +1,12 @@
+# Local-only config used by the test harness (wrangler dev --local). Not used for deployment.
+name = "memsync-test"
+main = "../worker/index.js"
+compatibility_date = "2025-09-01"
+[[d1_databases]]
+binding = "DB"
+database_name = "memsync-test"
+database_id = "00000000-0000-0000-0000-000000000000"
+[[rules]]
+type = "Text"
+globs = ["**/*.py", "**/*.html"]
+fallthrough = true
