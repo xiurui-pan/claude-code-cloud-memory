@@ -28,6 +28,14 @@ textarea{min-height:55vh;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;res
 .item b{display:block;word-break:break-all}
 .item small{color:var(--mut);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mut{color:var(--mut);font-size:13px}
+.grp.p{cursor:pointer;text-transform:none;color:var(--fg);font-weight:600;word-break:break-all}
+.grp.p:hover{color:var(--ac)}
+.grp.p.sel{color:var(--ac)}
+.tag{display:inline-block;font-size:11px;padding:0 6px;border:1px solid var(--bd);border-radius:10px;color:var(--mut);margin-left:6px}
+.tag.rv{border-color:#d97706;color:#d97706}
+.repo{display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--bd);flex-wrap:wrap}
+.repo span{flex:1;word-break:break-all}
+.box{border:1px solid var(--bd);border-radius:6px;background:var(--card);padding:10px;margin-top:12px}
 .banner{background:var(--wn);padding:8px 12px;border-radius:6px;margin-bottom:8px}
 .hist{border:1px solid var(--bd);border-radius:6px;background:var(--card);padding:8px;margin-top:12px}
 .hist .h{display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--bd);flex-wrap:wrap}
@@ -86,8 +94,8 @@ const I18N={
  en:{
   title:"Memory admin",logout:"Log out",new:"New",restoreAll:"Restore all…",status:"Sync status",backToMem:"Back to memory",reload:"Reload",
   search:"Search path, name, description…",allTypes:"All types",noType:"(no type)",pickFile:"Select a file on the left.",
-  noMatch:"No matching files.",openFail:"Failed to open: ",back:"← Back",pathPh:"file name, e.g. feedback_xxx.md",
-  addIdx:"Also append an index line to the end of MEMORY.md",save:"Save",del:"Delete",hist:"History",newFile:"New file",
+  noMatch:"No matching files.",openFail:"Failed to open: ",back:"← Back",pathPh:"path, e.g. feedback_xxx.md or projects/github.com/owner/repo/xxx.md",
+  addIdx:"Also append an index line to the MEMORY.md of this layer",save:"Save",del:"Delete",hist:"History",newFile:"New file",
   typePrompt:"Type (%s):",saved:"Saved",saveFail:"Save failed: ",idxConflict:"MEMORY.md update conflict",
   conflictBanner:"This file was changed by someone else. Your unsaved text is shown below; the base was moved to the latest version, so saving again will overwrite their change (the old version stays in History).",
   existsRename:"That file already exists, pick another name",deletedToast:"The file was deleted",
@@ -104,6 +112,14 @@ const I18N={
   restorePrompt:"Restore the whole memory store to which point in time? Format: 2026-01-15 15:30 (local time)",
   badTime:"Invalid time format",confirmRestoreAll:"Roll all files back to %s? Files created since then will be deleted; the rollback itself is recorded in history and can be undone.",
   rolledBack:"Rolled back %s file(s)",rolledMsg:"Rolled back.",rollFail:"Rollback failed: ",loadFail:"Failed to load: ",
+  layerReview:"Needs review",layerGlobal:"Global",layerLegacy:"Legacy root",emptyProject:"(no files)",projects:"Projects",
+  moveTo:"Move to…",move:"Move",moved:"Moved",moveFail:"Move failed: ",moveExists:"A file with that name already exists there",
+  reviewBanner:"A sync client placed this new file by a fallback rule (%s) because the session had several projects. Check that it belongs here.",
+  markReviewed:"Mark reviewed",reviewed:"Marked reviewed",
+  projectTitle:"Project",memberRepos:"Member repos",noRepos:"No repos recorded yet.",src_gitmodules:"from .gitmodules",src_manual:"manual",src_self:"own repo",
+  splitOff:"Split off",removeRepo:"Remove",addRepo:"Add repo",repoPh:"https://github.com/owner/repo",repoSet:"Membership saved",repoFail:"Failed: ",
+  mergeInto:"Merge into",mergeBtn:"Merge project",confirmMerge:"Merge %s into %s? Files move (history kept), same-name files get a .2 suffix, indexes are combined.",mergedOk:"Merged %s file(s)",
+  confirmRepo:"Remove %s from its project? It becomes its own project again at the next session (files stay where they are).",
   h_sync_failing:"Sync failed %n times in a row with no success since (last error: %error)",
   h_auto_memory_off:"%n report(s) in the last 7 days show native auto-memory is disabled; new sessions may neither read nor write memory",
   h_no_events:"No sync events recorded yet",h_no_recent_events:"No sync events received for more than 3 days",
@@ -112,8 +128,8 @@ const I18N={
  zh:{
   title:"记忆库管理",logout:"退出登录",new:"新建",restoreAll:"整体回滚…",status:"同步状态",backToMem:"返回记忆库",reload:"刷新",
   search:"搜索路径、名称、描述…",allTypes:"全部类型",noType:"(无类型)",pickFile:"从左侧选择一个文件。",
-  noMatch:"没有匹配的文件。",openFail:"打开失败：",back:"← 返回",pathPh:"文件名，如 feedback_xxx.md",
-  addIdx:"同时在 MEMORY.md 末尾追加一行索引",save:"保存",del:"删除",hist:"历史版本",newFile:"新文件",
+  noMatch:"没有匹配的文件。",openFail:"打开失败：",back:"← 返回",pathPh:"路径，如 feedback_xxx.md 或 projects/github.com/owner/repo/xxx.md",
+  addIdx:"同时在本层的 MEMORY.md 末尾追加一行索引",save:"保存",del:"删除",hist:"历史版本",newFile:"新文件",
   typePrompt:"类型（%s）：",saved:"已保存",saveFail:"保存失败：",idxConflict:"MEMORY.md 更新冲突",
   conflictBanner:"文件已被其他人修改。下方是你的未保存内容；已把基准更新为最新版本，再点保存会覆盖对方的修改（旧版本可在历史里找回）。",
   existsRename:"该文件已存在，请换个文件名",deletedToast:"文件已被删除",
@@ -130,6 +146,14 @@ const I18N={
   restorePrompt:"回滚整个记忆库到哪个时间点？格式：2026-01-15 15:30（本地时间）",
   badTime:"时间格式不对",confirmRestoreAll:"把所有文件回滚到 %s？此后新增的文件会被删除；回滚本身也会进历史，可以再撤销。",
   rolledBack:"已回滚 %s 个文件",rolledMsg:"已回滚。",rollFail:"回滚失败：",loadFail:"加载失败：",
+  layerReview:"待确认",layerGlobal:"全局",layerLegacy:"旧版根目录",emptyProject:"（没有文件）",projects:"项目",
+  moveTo:"移动到…",move:"移动",moved:"已移动",moveFail:"移动失败：",moveExists:"目标位置已有同名文件",
+  reviewBanner:"这个新文件是同步客户端按兜底规则（%s）放到这里的，因为该会话涉及多个项目。请确认归属是否正确。",
+  markReviewed:"标记已确认",reviewed:"已标记确认",
+  projectTitle:"项目",memberRepos:"成员仓库",noRepos:"还没有记录到仓库。",src_gitmodules:"来自 .gitmodules",src_manual:"手动",src_self:"自身仓库",
+  splitOff:"拆出",removeRepo:"移除",addRepo:"添加仓库",repoPh:"https://github.com/owner/repo",repoSet:"归属已保存",repoFail:"失败：",
+  mergeInto:"合并到",mergeBtn:"合并项目",confirmMerge:"把 %s 合并到 %s？文件会移动（保留历史），同名文件加 .2 后缀，索引会合并。",mergedOk:"已合并 %s 个文件",
+  confirmRepo:"把 %s 从所属项目移除？下次会话它会重新成为独立项目（文件留在原处）。",
   h_sync_failing:"同步连续失败 %n 次，之后没有成功记录（最近错误：%error）",
   h_auto_memory_off:"最近 7 天有 %n 次上报显示原生自动记忆未启用，新会话可能读不到也写不进记忆",
   h_no_events:"还没有任何同步记录",h_no_recent_events:"超过 3 天没有收到同步记录",
@@ -156,7 +180,7 @@ function applyLang(){
 }
 
 const TYPES=["user","feedback","project","reference"];
-let files=[],cur=null; // cur: {path,sha,content,isNew}
+let files=[],projects=[],cur=null,curProj=null; // cur: {path,sha,content,isNew}
 
 async function api(path,opt={}){
   const o={method:opt.method||"GET",headers:{}};
@@ -169,7 +193,7 @@ async function api(path,opt={}){
 let tt;function toast(m){const e=$("#toast");e.textContent=m;e.style.display="block";clearTimeout(tt);tt=setTimeout(()=>e.style.display="none",3000)}
 
 async function loadList(){
-  const d=await api("/files");files=d.files;
+  const d=await api("/files");files=d.files;projects=d.projects||[];
   renderTypeFilter();renderList();
 }
 function renderTypeFilter(){
@@ -178,29 +202,29 @@ function renderTypeFilter(){
   sel.innerHTML=`<option value="">${esc(t("allTypes"))}</option>`+types.map(x=>`<option value="${esc(x)}">${esc(x||t("noType"))}</option>`).join("");
   sel.value=types.includes(v)?v:"";
 }
+function itemHtml(f){
+  const base=f.layer==="project"?f.file:f.path;
+  return `<div class="item${cur&&cur.path===f.path?" sel":""}" data-p="${esc(f.path)}"><b>${esc(f.name||base)}${f.flagged?`<span class="tag rv">${esc(t("layerReview"))}</span>`:""}</b><small>${esc(f.name?base+" · ":"")}${esc(f.description||"")}</small><small>${fmt(f.modified)} · ${f.size} B${f.type?" · "+esc(f.type):""}</small></div>`;
+}
 function renderList(){
   const q=$("#q").value.trim().toLowerCase(),ft=$("#ft").value;
-  const groups={};
-  for(const f of files){
-    const g=f.type||"";
-    if(ft&&g!==ft)continue;
-    if(q&&!(f.path+" "+f.name+" "+f.description).toLowerCase().includes(q))continue;
-    (groups[g]=groups[g]||[]).push(f);
-  }
-  let h="";
-  for(const g of Object.keys(groups).sort()){
-    h+=`<div class="grp">${esc(g||t("noType"))} (${groups[g].length})</div>`;
-    for(const f of groups[g])h+=`<div class="item${cur&&cur.path===f.path?" sel":""}" data-p="${esc(f.path)}"><b>${esc(f.name||f.path)}</b><small>${esc(f.name?f.path+" · ":"")}${esc(f.description||"")}</small><small>${fmt(f.modified)} · ${f.size} B</small></div>`;
-  }
+  const ok=f=>(!ft||(f.type||"")===ft)&&(!q||(f.path+" "+f.name+" "+f.description).toLowerCase().includes(q));
+  const shown=files.filter(ok),filtering=!!(q||ft);
+  const section=(title,list,extra)=>list.length||(extra&&!filtering)?`<div class="grp${extra&&extra.pid?" p"+(curProj===extra.pid?" sel":""):""}"${extra&&extra.pid?` data-pid="${esc(extra.pid)}"`:""}>${esc(title)} (${list.length})</div>`+(list.length?list.map(itemHtml).join(""):`<p class="mut">${esc(t("emptyProject"))}</p>`):"";
+  let h=section(t("layerReview"),shown.filter(f=>f.flagged));
+  h+=section(t("layerGlobal"),shown.filter(f=>f.layer==="global"&&!f.flagged));
+  const pids=[...new Set([...projects.map(p=>p.pid),...shown.filter(f=>f.layer==="project").map(f=>f.pid)])].sort();
+  for(const pid of pids)h+=section(pid,shown.filter(f=>f.layer==="project"&&f.pid===pid&&!f.flagged),{pid});
+  h+=section(t("layerLegacy"),shown.filter(f=>f.layer==="legacy"&&!f.flagged));
   $("#files").innerHTML=h||`<p class="mut">${esc(t("noMatch"))}</p>`;
 }
-$("#files").onclick=e=>{const it=e.target.closest(".item");if(it)openFile(it.dataset.p)};
+$("#files").onclick=e=>{const it=e.target.closest(".item");if(it)return openFile(it.dataset.p);const g=e.target.closest(".grp.p");if(g)openProject(g.dataset.pid)};
 $("#q").oninput=renderList;$("#ft").onchange=renderList;
 
 async function openFile(path){
   try{
     const d=await api("/file?path="+encodeURIComponent(path));
-    cur={path:d.path,sha:d.sha,content:d.content,isNew:false};
+    cur={path:d.path,sha:d.sha,content:d.content,isNew:false};curProj=null;
     renderDetail();renderList();
   }catch(e){toast(t("openFail")+e.message);loadList()}
 }
@@ -211,17 +235,57 @@ function renderDetail(banner){
   <div class="row"><button class="back" id="bBack">${esc(t("back"))}</button>
    ${c.isNew?`<input id="dPath" value="${esc(c.path)}" placeholder="${esc(t("pathPh"))}" style="flex:1">`:`<b style="flex:1;word-break:break-all">${esc(c.path)}</b>`}</div>
   ${banner?`<div class="banner">${esc(banner)}</div>`:""}
+  ${flaggedOf(c)?`<div class="banner">${esc(t("reviewBanner",flaggedOf(c)))} <button id="bRev">${esc(t("markReviewed"))}</button></div>`:""}
   <textarea id="ed" spellcheck="false"></textarea>
-  ${c.isNew&&c.path!=="MEMORY.md"?`<label class="row mut"><input type="checkbox" id="addIdx" checked style="width:auto"> ${esc(t("addIdx"))}</label>`:""}
+  ${c.isNew&&!/(^|\/)MEMORY\.md$/.test(c.path)&&c.path!=="global/CLAUDE.md"?`<label class="row mut"><input type="checkbox" id="addIdx" checked style="width:auto"> ${esc(t("addIdx"))}</label>`:""}
   <div class="row"><button class="pri" id="bSave">${esc(t("save"))}</button>
    ${c.isNew?"":`<button class="dg" id="bDel">${esc(t("del"))}</button><button id="bHist">${esc(t("hist"))}</button>`}
    <span class="mut" id="meta"></span></div>
+  ${c.isNew||c.path==="global/CLAUDE.md"?"":`<div class="row"><select id="mvTo" style="width:auto;max-width:100%">${moveOptions(c.path)}</select><button id="bMove">${esc(t("move"))}</button></div>`}
   <div id="hist"></div>`;
   $("#ed").value=c.content;
   $("#meta").textContent=c.isNew?t("newFile"):"sha "+c.sha.slice(0,8);
   $("#bBack").onclick=()=>document.body.classList.remove("open");
   $("#bSave").onclick=save;
   if(!c.isNew){$("#bDel").onclick=del;$("#bHist").onclick=showHist}
+  if($("#bMove"))$("#bMove").onclick=moveFile;
+  if($("#bRev"))$("#bRev").onclick=async()=>{try{await api("/unflag",{method:"POST",body:{path:c.path}});toast(t("reviewed"));await loadList();openFile(c.path)}catch(e){toast(t("moveFail")+e.message)}};
+}
+function flaggedOf(c){const f=files.find(x=>x.path===c.path);return f&&f.flagged?f.flagged:null}
+const baseName=p=>p.slice(p.lastIndexOf("/")+1);
+function moveOptions(path){
+  const name=baseName(path),opts=[`<option value="">${esc(t("moveTo"))}</option>`];
+  for(const p of projects){const to="projects/"+p.pid+"/"+name;if(to!==path)opts.push(`<option value="${esc(to)}">${esc(p.pid)}</option>`)}
+  if(name!==path)opts.push(`<option value="${esc(name)}">${esc(t("layerLegacy"))}</option>`);
+  return opts.join("");
+}
+async function moveFile(){
+  const to=$("#mvTo").value;if(!to)return;
+  try{await api("/move",{method:"POST",body:{from:cur.path,to}});toast(t("moved"));const p=to;cur=null;await loadList();await openFile(p)}
+  catch(e){toast(e.status===409?t("moveExists"):t("moveFail")+e.message)}
+}
+async function openProject(pid){
+  curProj=pid;cur=null;document.body.classList.add("open");renderList();
+  const p=projects.find(x=>x.pid===pid)||{pid,repos:[],files:0};
+  const others=projects.filter(x=>x.pid!==pid);
+  $("#detail").innerHTML=`<div class="row"><button class="back" id="bBack">${esc(t("back"))}</button><b style="flex:1;word-break:break-all">${esc(t("projectTitle"))}: ${esc(pid)}</b></div>
+  <div class="box"><b>${esc(t("memberRepos"))}</b>`+(p.repos.length?p.repos.map(r=>`<div class="repo"><span>${esc(r.repo)}<span class="tag">${esc(t("src_"+r.source))}</span></span><button data-rm="${esc(r.repo)}">${esc(r.repo===pid?t("removeRepo"):t("splitOff"))}</button></div>`).join(""):`<p class="mut">${esc(t("noRepos"))}</p>`)+
+  `<div class="row" style="margin-top:8px"><input id="newRepo" placeholder="${esc(t("repoPh"))}" style="flex:1"><button id="bAddRepo">${esc(t("addRepo"))}</button></div></div>`+
+  (others.length?`<div class="box"><div class="row"><b>${esc(t("mergeInto"))}</b><select id="mergeTo" style="width:auto;max-width:100%">${others.map(o=>`<option value="${esc(o.pid)}">${esc(o.pid)}</option>`).join("")}</select><button class="dg" id="bMerge">${esc(t("mergeBtn"))}</button></div></div>`:"");
+  $("#bBack").onclick=()=>document.body.classList.remove("open");
+  $("#detail").onclick=async e=>{
+    const b=e.target.closest("button[data-rm]");if(!b)return;
+    if(!confirm(t("confirmRepo",b.dataset.rm)))return;
+    try{await api("/membership?repo="+encodeURIComponent(b.dataset.rm),{method:"DELETE"});toast(t("repoSet"));await loadList();openProject(pid)}catch(err){toast(t("repoFail")+err.message)}
+  };
+  $("#bAddRepo").onclick=async()=>{
+    const repo=$("#newRepo").value.trim();if(!repo)return;
+    try{await api("/membership",{method:"PUT",body:{repo,pid}});toast(t("repoSet"));await loadList();openProject(pid)}catch(err){toast(t("repoFail")+err.message)}
+  };
+  if($("#bMerge"))$("#bMerge").onclick=async()=>{
+    const into=$("#mergeTo").value;if(!confirm(t("confirmMerge",pid,into)))return;
+    try{const r=await api("/merge-project",{method:"POST",body:{from:pid,into}});toast(t("mergedOk",r.moved.length));curProj=null;showPlaceholder("pickFile");await loadList()}catch(err){toast(t("repoFail")+err.message)}
+  };
 }
 function showPlaceholder(key){$("#detail").innerHTML=`<p class="mut">${esc(t(key))}</p>`}
 function newFile(){
@@ -243,8 +307,9 @@ async function save(){
     if(cur.isNew&&$("#addIdx")&&$("#addIdx").checked){
       const fm=(content.match(/^name:\s*(.*)$/m)||[])[1]||path;
       const ds=(content.match(/^description:\s*(.*)$/m)||[])[1]||"";
-      const line=`- [${fm.trim()||path}](${path})${ds.trim()?" — "+ds.trim():""}`;
-      await appendIndex(line);
+      const dir=path.slice(0,path.lastIndexOf("/")+1);
+      const line=`- [${fm.trim()||baseName(path)}](${baseName(path)})${ds.trim()?" — "+ds.trim():""}`;
+      await appendIndex(dir,line);
     }
     toast(t("saved"));
     await loadList();await openFile(path);
@@ -254,12 +319,12 @@ async function save(){
     }else{toast(t("saveFail")+e.message);btn.disabled=false}
   }
 }
-async function appendIndex(line){
+async function appendIndex(dir,line){
   for(let i=0;i<3;i++){
     let base=null,text="";
-    try{const d=await api("/file?path=MEMORY.md");base=d.sha;text=d.content}catch(e){if(e.status!==404)throw e}
+    try{const d=await api("/file?path="+encodeURIComponent(dir+"MEMORY.md"));base=d.sha;text=d.content}catch(e){if(e.status!==404)throw e}
     if(text&&!text.endsWith("\n"))text+="\n";
-    try{await api("/file",{method:"PUT",body:{path:"MEMORY.md",content:text+line+"\n",base_sha:base}});return}
+    try{await api("/file",{method:"PUT",body:{path:dir+"MEMORY.md",content:text+line+"\n",base_sha:base}});return}
     catch(e){if(e.status!==409)throw e}
   }
   throw new Error(t("idxConflict"));
@@ -317,8 +382,8 @@ function renderStatus(){
    `<p class="mut">${esc(t("lastOk"))}${rel(d.last_success)} · ${esc(t("failStreak"))}${d.consecutive_failures}</p>`+
    `<h2>${esc(t("cliVer"))}</h2>`+(d.versions.length?`<div class="tw"><table><tr><th>${esc(t("version"))}</th><th>${esc(t("firstSeen"))}</th><th>${esc(t("lastSeen"))}</th><th>${esc(t("count"))}</th></tr>`+
      d.versions.map(v=>`<tr><td>${esc(v.version)}</td><td>${fmt(v.first_seen)}</td><td>${fmt(v.last_seen)}</td><td>${v.n}</td></tr>`).join("")+'</table></div>':`<p class="mut">${esc(t("noRecords"))}</p>`)+
-   `<h2>${esc(t("recent"))}</h2>`+(d.recent.length?`<div class="tw"><table><tr><th>${esc(t("time"))}</th><th>${esc(t("kind"))}</th><th>${esc(t("result"))}</th><th>${esc(t("error"))}</th><th>${esc(t("files"))}</th><th>${esc(t("version"))}</th><th>${esc(t("autoMem"))}</th><th>${esc(t("dir"))}</th></tr>`+
-     d.recent.map(e=>`<tr><td>${fmt(e.at)}</td><td>${esc(e.event==="pull"?t("pull"):t("push"))}</td><td class="${e.ok?"":"bad"}">${esc(e.ok?t("success"):t("failure"))}</td><td>${esc(e.error||"")}</td><td>${e.files??""}</td><td>${esc(e.cli_version||"")}</td><td>${esc(e.auto_memory||"")}</td><td>${esc(e.cwd_name||"")}</td></tr>`).join("")+'</table></div>':`<p class="mut">${esc(t("noRecords"))}</p>`);
+   `<h2>${esc(t("recent"))}</h2>`+(d.recent.length?`<div class="tw"><table><tr><th>${esc(t("time"))}</th><th>${esc(t("kind"))}</th><th>${esc(t("result"))}</th><th>${esc(t("error"))}</th><th>${esc(t("files"))}</th><th>${esc(t("version"))}</th><th>${esc(t("autoMem"))}</th><th>${esc(t("dir"))}</th><th>${esc(t("projects"))}</th></tr>`+
+     d.recent.map(e=>`<tr><td>${fmt(e.at)}</td><td>${esc(e.event==="pull"?t("pull"):t("push"))}</td><td class="${e.ok?"":"bad"}">${esc(e.ok?t("success"):t("failure"))}</td><td>${esc(e.error||"")}</td><td>${e.files??""}</td><td>${esc(e.cli_version||"")}</td><td>${esc(e.auto_memory||"")}</td><td>${esc(e.cwd_name||"")}</td><td>${esc((e.projects||"").split(",").join(", "))}</td></tr>`).join("")+'</table></div>':`<p class="mut">${esc(t("noRecords"))}</p>`);
 }
 $("#bNew").onclick=newFile;
 $("#bReload").onclick=()=>{if(document.body.classList.contains("st"))return loadStatus();loadList().then(()=>cur&&!cur.isNew&&openFile(cur.path))};
@@ -338,6 +403,7 @@ $("#bLang").onclick=()=>{
   applyLang();
   renderTypeFilter();renderList();
   if(cur){renderDetail();if(draft!==null)$("#ed").value=draft;if(draftPath!==null&&$("#dPath"))$("#dPath").value=draftPath}
+  else if(curProj)openProject(curProj);
   else showPlaceholder("pickFile");
   renderStatus();
 };
