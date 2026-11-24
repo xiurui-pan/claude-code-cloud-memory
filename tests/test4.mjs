@@ -146,6 +146,13 @@ await t("new file whose name is taken: stored under a free name when the client 
   // names the client holds locally (not yet pushed) are skipped
   const av = await push([{ path: D + "n.md", content: "avoid\n", base_sha: null, on_conflict: "rename", avoid: ["n.6.md", "n.7.md"] }], "B");
   assert.equal(av.results[0].to, D + "n.8.md");
+  // a name at the length limit is shortened so the new path stays valid (editable, deletable)
+  const long = D + "l".repeat(200 - D.length) + ".md";
+  await push([{ path: long, content: "first\n", base_sha: null }], "A");
+  const lr = await push([{ path: long, content: "second\n", base_sha: null, on_conflict: "rename" }], "B");
+  assert.equal(lr.results[0].status, "renamed"); assert(lr.results[0].to.length <= long.length, lr.results[0].to);
+  const edit = await push([{ path: lr.results[0].to, content: "edited\n", base_sha: sha("second\n") }], "B");
+  assert.equal(edit.results[0].status, "written");
   const old = await push([{ path: D + "n.md", content: "old client\n", base_sha: null }], "C");
   assert.equal(old.results[0].status, "overwrote_remote"); // without the flag: unchanged behaviour
 });

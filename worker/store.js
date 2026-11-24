@@ -151,7 +151,15 @@ async function writeRenamed(env, path, content, sha, avoid, session) {
   const stem = dot > slash ? path.slice(0, dot) : path, ext = dot > slash ? path.slice(dot) : "";
   const skip = new Set(Array.isArray(avoid) ? avoid.map(String) : []);
   for (let n = 2, tries = 0; n < 1000 && tries < 20; n++) {
-    const cand = `${stem}.${n}${ext}`;
+    let cand = `${stem}.${n}${ext}`;
+    if (!validPath(cand)) {
+      // too long: shorten the file name (never the folder) so the new path passes the same checks
+      const over = cand.length - path.length + (validPath(path) ? 0 : 1);
+      const base = stem.slice(slash);
+      if (base.length <= over) return null;
+      cand = `${stem.slice(0, stem.length - over)}.${n}${ext}`;
+      if (!validPath(cand)) return null;
+    }
     if (skip.has(cand.slice(slash))) continue;
     const row = await env.DB.prepare("SELECT path, content, sha, deleted FROM files WHERE path = ?").bind(cand).first();
     if (row && !row.deleted) continue;
