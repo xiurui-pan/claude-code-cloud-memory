@@ -19,7 +19,7 @@ jobs:
           python-version: "3.12"
       - name: Syntax checks
         run: |
-          for f in worker/index.js worker/store.js worker/admin.js selfhost/server.mjs selfhost/text-loader.mjs tests/backend.mjs tests/test.mjs tests/test2.mjs tests/test3.mjs tests/run.mjs; do node --check "$f"; done
+          for f in worker/index.js worker/store.js worker/layers.js worker/admin.js selfhost/server.mjs selfhost/text-loader.mjs tests/backend.mjs tests/test.mjs tests/test2.mjs tests/test3.mjs tests/test4.mjs tests/test5.mjs tests/test6.mjs tests/run.mjs tools/migrate-layers.mjs; do node --check "$f"; done
           python -m py_compile worker/memsync.py
           bash -n deploy.sh
           bash -n setup-script.template.sh

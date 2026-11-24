@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const backends = process.env.BACKEND ? [process.env.BACKEND] : ["cf", "node"];
 for (const backend of backends) {
-  for (const f of ["test.mjs", "test2.mjs", "test3.mjs", "test4.mjs", "test5.mjs"]) {
+  for (const f of ["test.mjs", "test2.mjs", "test3.mjs", "test4.mjs", "test5.mjs", "test6.mjs"]) {
     if (f === "test3.mjs" && backend !== "node") continue;
     console.log(`\n=== ${f} [${backend}] ===`);
     const r = spawnSync(process.execPath, [path.join(here, f)], { cwd: here, stdio: "inherit", env: { ...process.env, BACKEND: backend } });
