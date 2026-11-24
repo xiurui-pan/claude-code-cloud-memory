@@ -205,6 +205,34 @@ await t("concurrent CLAUDE.md edits from two sessions merge (3-way line merge)",
   X.pull(); assert(X.claude().includes("- Y line"));
 });
 
+await t("CLAUDE.md concurrent edits keep blank lines and land under their section", async () => {
+  const X = session(TMP), Y = session(TMP);
+  X.pull();
+  fs.writeFileSync(X.g, HEADER + "\n## One\n- o1\n\n## Two\n- t1\n"); X.push();
+  X.pull(); Y.pull();
+  fs.writeFileSync(X.g, X.claude().replace("- o1\n", "- o1\n- o2\n"));
+  fs.writeFileSync(Y.g, Y.claude().replace("- t1\n", "- t1\n- t2\n"));
+  X.push(); Y.push();
+  assert.equal(srv()["global/CLAUDE.md"].content, "## One\n- o1\n- o2\n\n## Two\n- t1\n- t2\n");
+  assert.equal(Y.claude(), HEADER + "\n## One\n- o1\n- o2\n\n## Two\n- t1\n- t2\n");
+});
+
+await t("new file created in two sessions under the same name: both kept, the later one renamed with its index link", async () => {
+  const root = path.join(wsU, "tools");
+  const X = session(root), Y = session(root);
+  X.pull(); Y.pull();
+  X.write("clash.md", "from X\n"); X.write("MEMORY.md", X.read("MEMORY.md") + "- [Clash](clash.md) — X\n"); X.push();
+  Y.write("clash.md", "from Y\n"); Y.write("MEMORY.md", Y.read("MEMORY.md") + "- [Clash](clash.md) — Y\n"); Y.push();
+  const T = pd("github.com/acme/tools"), s = srv();
+  assert.equal(s[T + "clash.md"].content, "from X\n"); assert.equal(s[T + "clash.2.md"].content, "from Y\n");
+  assert(!Y.has("clash.md") && Y.read("clash.2.md") === "from Y\n", Y.files().join());
+  assert(Y.read("MEMORY.md").includes("(clash.2.md) — Y"));
+  const idx = s[T + "MEMORY.md"].content;
+  assert(idx.includes("- [Clash](clash.md) — X") && idx.includes("- [Clash](clash.2.md) — Y") && !idx.includes("(clash.md) — Y"), idx);
+  Y.push(); assert.equal(srv()[T + "clash.2.md"].content, "from Y\n"); // idle push is quiet, no clash.3
+  assert(!srv()[T + "clash.3.md"]);
+});
+
 await t("same container: pull pushes pending edits first, then mirrors the server (deletions applied)", async () => {
   const s = session(path.join(wsS, "platform")); s.pull();
   s.write("pending.md", "unsent\n");

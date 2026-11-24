@@ -114,6 +114,33 @@ await t("routed_by tags the history session of that file only", async () => {
   assert.equal(rows[0].session, "S1|routed:first"); assert.equal(rows[1].session, "S1");
 });
 
+await t("3-way merge is positional: blank lines and sections kept, edits land under their heading", async () => {
+  const P2 = "projects/github.com/acme/merge3/MEMORY.md";
+  const g0 = "# Me\n\n## A\n- a1\n\n## B\n- b1\n";
+  await push([{ path: P2, content: g0, base_sha: null }]);
+  const base = sha(g0);
+  await push([{ path: P2, content: "# Me\n\n## A\n- a1\n- a2\n\n## B\n- b1\n", base_sha: base, added_lines: ["- a2"], removed_lines: [] }], "A");
+  const b = await push([{ path: P2, content: "# Me\n\n## A\n\n## B\n- b1\n- b2\n", base_sha: base, added_lines: ["- b2"], removed_lines: ["- a1"] }], "B");
+  assert.equal(b.results[0].status, "merged");
+  assert.equal(b.results[0].content, "# Me\n\n## A\n- a2\n\n## B\n- b1\n- b2\n");
+  // base unknown to the server (not in history): falls back to the append merge, and a removed blank line strips nothing
+  const cur = b.results[0].content;
+  const c = await push([{ path: P2, content: cur + "- c\n", base_sha: sha("never seen\n"), added_lines: ["- c"], removed_lines: [""] }], "C");
+  assert.equal(c.results[0].content, cur + "- c\n");
+});
+
+await t("new file whose name is taken: stored under a free name when the client asks to rename", async () => {
+  const D = "projects/github.com/acme/rename/";
+  await push([{ path: D + "n.md", content: "first\n", base_sha: null }], "A");
+  await push([{ path: D + "n.2.md", content: "second\n", base_sha: null }], "A");
+  const r = await push([{ path: D + "n.md", content: "mine\n", base_sha: null, on_conflict: "rename" }], "B");
+  assert.equal(r.results[0].status, "renamed"); assert.equal(r.results[0].to, D + "n.3.md");
+  const same = await push([{ path: D + "n.md", content: "first\n", base_sha: null, on_conflict: "rename" }], "B");
+  assert.equal(same.results[0].status, "noop"); // identical content is not a collision
+  const old = await push([{ path: D + "n.md", content: "old client\n", base_sha: null }], "C");
+  assert.equal(old.results[0].status, "overwrote_remote"); // without the flag: unchanged behaviour
+});
+
 await t("move: history kept, 404/409/400, index merge", async () => {
   await push([{ path: "m1.md", content: "m1 body\n", base_sha: null }, { path: "m2.md", content: "m2 body\n", base_sha: null }]);
   const r = await jpost("/v1/move", { from: "m1.md", to: `projects/${P}/m1.md` });
