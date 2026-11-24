@@ -22,6 +22,13 @@ MEMSYNC_GLOBAL_FILE (default ~/.claude/CLAUDE.md), MEMSYNC_WORKSPACE (workspace 
 CLAUDE_PROJECT_DIR), MEMSYNC_STATE (default ~/.claude/memsync), MEMSYNC_LANG (en|zh, default en).
 A hook must never break the session: every failure exits 0.
 
+Local mode (Claude Code CLI / desktop on your own machine; chosen when neither CLAUDE_CODE_REMOTE nor
+MEMSYNC_DIR is set, or with MEMSYNC_MODE=local): the memory dir is the project's native one,
+<config>/projects/<slug>/memory, state is kept per project under <config>/memsync, the token comes from
+MEMSYNC_TOKEN / MEMSYNC_TOKEN_FILE / <config>/memsync/token, and the first sync of a dir only merges.
+Extra commands: install [--url U] [--token-stdin | --token-file F], uninstall [--purge],
+migrate [--apply], where [dir]. See docs/design-local.md.
+
 Error visibility: failures are reported to the user as a hook JSON `systemMessage` (stdout is
 either empty or exactly one JSON object), and a small status event is POSTed to /v1/status
 (queued locally in STATE/status_queue.json when the server can't be reached).
@@ -858,12 +865,522 @@ def file_lock(path, timeout=None):
                 pass
 
 
+# ---------- local mode (Claude Code CLI / desktop on the user's own machine) ----------
+# Cloud: one fixed memory dir (MEMSYNC_DIR), one state dir, a proxy injects the token.
+# Local: every project has its own native dir (<config>/projects/<slug>/memory), several sessions in
+# different projects run at once, the token comes from a file / env var. Same server, same layers:
+# only the paths, the lock scope and the first sync differ. See docs/design-local.md.
+MODE = os.environ.get("MEMSYNC_MODE") or ("cloud" if (os.environ.get("CLAUDE_CODE_REMOTE") or os.environ.get("MEMSYNC_DIR")) else "local")
+LOCAL_COMMANDS = ("install", "uninstall", "migrate", "where")
+LOCAL_MARK = "memsync.py"  # hook commands containing this are ours
+LOCAL_HOOKS = (("SessionStart", "pull", 30), ("Stop", "push", 30), ("SessionEnd", "push", 15))
+LOCAL_LOCK_TIMEOUT = 20
+LOCAL_HEADER = HEADER.replace("/root/.claude/CLAUDE.md", "~/.claude/CLAUDE.md")
+LOCAL_NO_URL = {
+    "en": "Memory sync is not configured: run `python memsync.py install --url <server>` once (or set MEMSYNC_URL).",
+    "zh": "记忆同步未配置：请运行一次 `python memsync.py install --url <server>`（或设置 MEMSYNC_URL）。",
+}
+LOCAL = {"root": None, "state_root": None, "global_base": None}
+_ORIG = {"load_base": load_base, "save_base": save_base, "make_layout": make_layout, "detect_workspace": detect_workspace}
+
+
+def cfg_dir():
+    return Path(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"))
+
+
+def local_state_root():
+    return Path(os.path.expanduser(os.environ.get("MEMSYNC_STATE") or str(cfg_dir() / "memsync")))
+
+
+def java_hash(s):
+    """Java/JS String.hashCode over UTF-16 code units, as a signed 32-bit int."""
+    h = 0
+    data = s.encode("utf-16-le", "surrogatepass")
+    for i in range(0, len(data), 2):
+        h = (31 * h + int.from_bytes(data[i:i + 2], "little")) & 0xFFFFFFFF
+    return h - (1 << 32) if h >= (1 << 31) else h
+
+
+def base36(n):
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = ""
+    while n:
+        n, r = divmod(n, 36)
+        out = digits[r] + out
+    return out or "0"
+
+
+def native_slug(path):
+    """Claude Code's directory name for a project path: every UTF-16 unit outside [A-Za-z0-9] becomes '-',
+    paths over 200 units are cut and get a hash suffix. Same on every OS ('C:\\Users\\u\\p' -> 'C--Users-u-p')."""
+    path = str(path)
+    units = path.encode("utf-16-le", "surrogatepass")
+    s = "".join(chr(u) if (u < 128 and chr(u).isalnum()) else "-" for u in (int.from_bytes(units[i:i + 2], "little") for i in range(0, len(units), 2)))
+    if len(s) <= 200:
+        return s
+    return s[:200] + "-" + base36(abs(java_hash(path)))
+
+
+def canonical_git_root(top):
+    """The root Claude Code keys project memory on: a linked worktree uses the main worktree's root,
+    a submodule checkout is its own root."""
+    g = top / ".git"
+    try:
+        if g.is_file():
+            txt = g.read_text(encoding="utf-8").strip()
+            if txt.startswith("gitdir:"):
+                gd = (top / txt[7:].strip()).resolve()
+                cd = gd / "commondir"
+                if cd.is_file():
+                    common = (gd / cd.read_text(encoding="utf-8").strip()).resolve()
+                    if common.name == ".git":
+                        return common.parent
+    except OSError:
+        pass
+    return top
+
+
+def user_auto_memory_dir():
+    """autoMemoryDirectory from the user's settings.json, if any (then every project shares that dir)."""
+    v = read_json(cfg_dir() / "settings.json", {}).get("autoMemoryDirectory")
+    return Path(os.path.expanduser(v)) if isinstance(v, str) and v.strip() else None
+
+
+def local_project_root(hook_in):
+    return LOCAL["root"] or os.environ.get("MEMSYNC_WORKSPACE") or os.environ.get("CLAUDE_PROJECT_DIR") or hook_in.get("cwd") or os.getcwd()
+
+
+def native_memory_dir(root):
+    """Where Claude Code keeps auto-memory for a session launched in `root`."""
+    top = find_git_root(root)
+    base = canonical_git_root(top) if top else Path(root)
+    return cfg_dir() / "projects" / native_slug(base) / "memory"
+
+
+def local_detect_workspace(hook_in):
+    """One repo at most: the git root of the project dir. Unlike cloud there is no scan of subdirectories."""
+    root = local_project_root(hook_in)
+    top = find_git_root(root)
+    info = repo_info(top) if top else None
+    return ([info] if info else []), (str(top) if top else None)
+
+
+def local_make_layout(hook_in):
+    layout = _ORIG["make_layout"](hook_in)
+    if layout.get("legacy"):
+        raise RuntimeError("the server has no layers API (/v1/resolve); upgrade it")
+    if not layout["repos"] and layout["projects"] == [NOREPO]:
+        layout["projects"] = []  # not a git repo with an origin: global memory only
+    return layout
+
+
+def local_load_base():
+    """Per-project base.json plus the machine-wide base of the global file (CLAUDE.md is shared by all projects)."""
+    b = _ORIG["load_base"]()
+    if b is None:
+        return None
+    g = read_json(LOCAL["global_base"], None)
+    if isinstance(g, dict) and g.get("sha"):
+        b.setdefault("files", {})[GLOBAL] = g
+    return b
+
+
+def local_save_base(base):
+    files = dict(base.get("files", {}))
+    g = files.pop(GLOBAL, None)
+    if g is not None:
+        write_json(LOCAL["global_base"], g)
+    _ORIG["save_base"]({**base, "files": files})
+
+
+def local_resolve_token(root):
+    """Token for this process: MEMSYNC_TOKEN, else MEMSYNC_TOKEN_FILE, else config token_file, else <state>/token."""
+    if os.environ.get("MEMSYNC_TOKEN"):
+        return
+    cfg = read_json(root / "config.json", {})
+    for cand in (os.environ.get("MEMSYNC_TOKEN_FILE"), cfg.get("token_file"), str(root / "token")):
+        if cand and os.path.isfile(os.path.expanduser(cand)):
+            p = os.path.expanduser(cand)
+            if os.name == "posix" and os.stat(p).st_mode & 0o077:
+                log(f"warning: token file {p} is readable by other users (chmod 600 it)")
+            try:
+                with open(p, encoding="utf-8") as f:
+                    os.environ["MEMSYNC_TOKEN"] = f.read().strip()
+            except OSError:
+                pass
+            return
+
+
+def local_setup(hook_in, root=None, native=None):
+    """Point the module globals at this project's native dir and per-project state. `root`/`native` are for
+    migrate (explicit project dir and memory dir); hooks derive both from the session."""
+    global URL, MEM, STATE, BASE, LAYOUT, NOTIFY, QUEUE, CLI_CACHE, AM_CACHE, GLOBAL_FILE, HEADER, LOCK_PATH, LOCK_TIMEOUT, LOG
+    global load_base, save_base, make_layout, detect_workspace
+    LOCAL["root"] = root
+    sroot = local_state_root()
+    LOCAL["state_root"], LOCAL["global_base"] = sroot, sroot / "global_base.json"
+    cfg = read_json(sroot / "config.json", {})
+    URL = (os.environ.get("MEMSYNC_URL") or cfg.get("url") or "").strip().rstrip("/")
+    MSG["no_url"] = LOCAL_NO_URL[LANG]
+    local_resolve_token(sroot)
+    GLOBAL_FILE = Path(os.path.expanduser(os.environ.get("MEMSYNC_GLOBAL_FILE") or str(cfg_dir() / "CLAUDE.md")))
+    HEADER = LOCAL_HEADER
+    load_base, save_base, make_layout, detect_workspace = local_load_base, local_save_base, local_make_layout, local_detect_workspace
+    LOCK_PATH, LOCK_TIMEOUT, LOG = sroot / "lock", LOCAL_LOCK_TIMEOUT, sroot / "sync.log"
+    repos, _top = local_detect_workspace(hook_in)
+    if os.environ.get("MEMSYNC_DIR"):
+        MEM = Path(os.path.expanduser(os.environ["MEMSYNC_DIR"]))
+    elif native:
+        MEM = Path(native)
+    elif repos:
+        MEM = user_auto_memory_dir() or native_memory_dir(local_project_root(hook_in))
+    else:
+        MEM = sroot / "projects" / "_global" / "memory"  # stays empty: only the global file syncs here
+    key = "_global" if not repos else re.sub(r"[^A-Za-z0-9]", "-", MEM.parent.name)[-40:] + "-" + hashlib.sha1(str(MEM).encode("utf-8")).hexdigest()[:8]
+    STATE = sroot / "projects" / key
+    BASE, LAYOUT = STATE / "base.json", STATE / "layout.json"
+    NOTIFY, QUEUE, CLI_CACHE, AM_CACHE = STATE / "notify.json", STATE / "status_queue.json", STATE / "cli_version.json", STATE / "auto_memory.json"
+    return MEM
+
+
+def union_lines(first, second):
+    """`first` as is, then the lines of `second` that `first` lacks (blank lines between kept lines survive).
+    Nothing of either side is dropped."""
+    first, second = first.replace("\r\n", "\n"), second.replace("\r\n", "\n")
+    if not first.strip():
+        return second if second.endswith("\n") or not second else second + "\n"
+    out = first if first.endswith("\n") else first + "\n"
+    present = {l.rstrip() for l in first.split("\n")}
+    new, pending_blank = [], False
+    for l in second.split("\n"):
+        if not l.strip():
+            pending_blank = bool(new)
+        elif l.rstrip() not in present:
+            if pending_blank:
+                new.append("")
+            new.append(l)
+            present.add(l.rstrip())
+            pending_blank = False
+    return out + ("\n".join(new) + "\n" if new else "")
+
+
+def unique_local_name(name, taken):
+    stem, ext = os.path.splitext(name)
+    cand, n = f"{stem}.local{ext}", 2
+    while cand in taken:
+        cand, n = f"{stem}.local{n}{ext}", n + 1
+    return cand
+
+
+def local_backup(rel, text):
+    d = STATE / "backup" / time.strftime("%Y%m%d-%H%M%S")
+    write_text(d / rel, text)
+
+
+def local_first_sync(session, hook_in):
+    """First sync of a native dir: merge, never delete. Local and server content are unioned on disk first
+    (a same-name file with different content keeps the server version at the name and the local one as
+    `<stem>.local.md`; MEMORY.md and the global file are line unions), the base is set to the server state, and
+    the ordinary push then uploads whatever is local only."""
+    layout = make_layout(hook_in)
+    projects = layout["projects"]
+    res = request("GET", "/v1/pull?projects=" + ",".join(projects) + "&global=1")
+    server = {f["path"]: f["content"] for f in res.get("files", [])}
+    known = {}
+    if projects:
+        pd = pdir(projects[0])
+        local = local_files()
+        srv = {sp[len(pd):]: t for sp, t in server.items() if sp.startswith(pd) and sp != pd + INDEX}
+        taken = set(local) | set(srv) | {INDEX}
+        rename = {}
+        for name, text in sorted(local.items()):
+            if name != INDEX and name in srv and srv[name] != text:
+                rename[name] = unique_local_name(name, taken)
+                taken.add(rename[name])
+                local_backup(name, text)
+                write_local(rename[name], text)
+        for name, text in srv.items():
+            dest = MEM / name
+            if name not in local and dest.exists():  # unreadable or oversized local file: move it aside, never overwrite
+                aside = unique_local_name(name, taken)
+                taken.add(aside)
+                os.replace(str(dest), str(MEM / aside))
+            write_local(name, text)
+            known[pd + name] = base_entry(text, pd + name)
+            layout["files"][name] = pd + name
+        sidx = server.get(pd + INDEX, "")
+        merged = union_lines(sidx, link_rewrite_text(local[INDEX], rename)) if INDEX in local else sidx
+        if merged or INDEX in local:
+            write_local(INDEX, merged)
+        if pd + INDEX in server:
+            known[pd + INDEX] = base_entry(sidx, pd + INDEX)
+    gbase = read_json(LOCAL["global_base"], None)
+    if isinstance(gbase, dict) and GLOBAL in server:  # global file already synced from another project of this machine
+        lb = read_global()
+        if lb is not None and lb.lstrip("\n") == gbase.get("content", "").lstrip("\n"):  # no pending local edit: take the server text
+            write_text(GLOBAL_FILE, render_global(server[GLOBAL]))
+            known[GLOBAL] = base_entry(server[GLOBAL], GLOBAL)
+    if not isinstance(gbase, dict):  # first sync of the global file on this machine
+        try:
+            local_backup("CLAUDE.md", GLOBAL_FILE.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            pass
+        body = union_lines(server.get(GLOBAL, ""), read_global() or "")
+        write_text(GLOBAL_FILE, render_global(body))
+        if GLOBAL in server:
+            known[GLOBAL] = base_entry(server[GLOBAL], GLOBAL)
+    save_base({"v": 3, "files": known})
+    write_json(LAYOUT, layout)
+    log(f"first sync: {len(server)} server file(s), projects {','.join(projects) or '-'}")
+    res = do_push(session, hook_in)
+    res["changes"] = max(res["changes"], 1)
+    return res
+
+
 def dispatch(cmd, session, hook_in):
+    if MODE == "local" and load_base() is None:
+        return local_first_sync(session, hook_in)
     return do_pull(session, hook_in) if cmd == "pull" else do_push(session, hook_in)
+
+
+# ----- install / uninstall / migrate / where -----
+def hook_command(python, script, sub, windows=None):
+    """Hook command line. On Windows, forward slashes in double quotes work in Git Bash and cmd alike."""
+    win = (os.name == "nt") if windows is None else windows
+    fix = (lambda p: str(p).replace("\\", "/")) if win else str
+    return f'"{fix(python)}" "{fix(script)}" {sub}'
+
+
+def is_ours(hook):
+    return isinstance(hook, dict) and LOCAL_MARK in str(hook.get("command", ""))
+
+
+def strip_hooks(settings):
+    """Remove our hook entries from a settings dict (in place); empty containers we leave behind are dropped."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return settings
+    for ev in list(hooks):
+        groups = hooks[ev]
+        if not isinstance(groups, list):
+            continue
+        kept = []
+        for g in groups:
+            inner = g.get("hooks") if isinstance(g, dict) else None
+            if isinstance(inner, list) and any(is_ours(h) for h in inner):
+                rest = [h for h in inner if not is_ours(h)]
+                if rest:
+                    kept.append({**g, "hooks": rest})
+            else:
+                kept.append(g)
+        if kept:
+            hooks[ev] = kept
+        else:
+            del hooks[ev]
+    if not hooks:
+        del settings["hooks"]
+    return settings
+
+
+def merge_hooks(settings, command_for):
+    """Add our hooks to a settings dict (in place), replacing earlier memsync entries, keeping every other hook."""
+    if not isinstance(settings.get("hooks", {}), dict):
+        raise ValueError("settings.json: 'hooks' is not an object")
+    strip_hooks(settings)
+    hooks = settings.setdefault("hooks", {})
+    for ev, sub, timeout in LOCAL_HOOKS:
+        hooks.setdefault(ev, []).append({"hooks": [{"type": "command", "timeout": timeout, "command": command_for(sub)}]})
+    return settings
+
+
+def load_settings(path):
+    if not path.exists():
+        return {}
+    try:
+        d = json.loads(path.read_text(encoding="utf-8-sig"))
+    except ValueError as e:
+        raise ValueError(f"{path} is not valid JSON ({e}); fix it first, nothing was changed")
+    if not isinstance(d, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return d
+
+
+def save_settings(path, settings):
+    """Backup (once per change) + atomic write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        shutil.copy2(str(path), str(path) + ".memsync-bak-" + time.strftime("%Y%m%d-%H%M%S"))
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def write_private(path, text):
+    """UTF-8 file readable only by the user (0600 on POSIX, icacls on Windows)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    if os.name == "posix":
+        os.chmod(str(path), 0o600)
+    elif os.name == "nt":
+        try:
+            subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{os.environ.get('USERNAME', '')}:F"], capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def cmd_install(args):
+    import argparse
+    ap = argparse.ArgumentParser(prog="memsync.py install")
+    ap.add_argument("--url")
+    ap.add_argument("--token-file", help="existing file holding the token (kept where it is, path recorded)")
+    ap.add_argument("--token-stdin", action="store_true", help="read the token from stdin into a private file")
+    a = ap.parse_args(args)
+    sroot = local_state_root()
+    cfg = read_json(sroot / "config.json", {})
+    url = (a.url or cfg.get("url") or os.environ.get("MEMSYNC_URL") or "").strip().rstrip("/")
+    if not re.match(r"^https?://[^/\s]+", url):
+        print("install: --url https://your-memory-host is required", file=sys.stderr)
+        return 2
+    settings_path = cfg_dir() / "settings.json"
+    settings = load_settings(settings_path)  # fails before anything is written
+    sroot.mkdir(parents=True, exist_ok=True)
+    script = sroot / "memsync.py"
+    if os.path.abspath(__file__) != os.path.abspath(str(script)):
+        shutil.copy2(__file__, str(script))
+    if a.token_stdin:
+        token = sys.stdin.read().strip()
+        if not token:
+            print("install: empty token on stdin", file=sys.stderr)
+            return 2
+        write_private(sroot / "token", token + "\n")
+        cfg.pop("token_file", None)
+    elif a.token_file:
+        tf = os.path.abspath(os.path.expanduser(a.token_file))
+        if not os.path.isfile(tf):
+            print(f"install: token file not found: {tf}", file=sys.stderr)
+            return 2
+        cfg["token_file"] = tf
+    cfg["url"] = url
+    write_json(sroot / "config.json", cfg)
+    merge_hooks(settings, lambda sub: hook_command(sys.executable, script, sub))
+    save_settings(settings_path, settings)
+    have_token = bool(os.environ.get("MEMSYNC_TOKEN")) or any(os.path.isfile(os.path.expanduser(p)) for p in (cfg.get("token_file"), str(sroot / "token")) if p)
+    print(f"memsync installed: hooks in {settings_path}, client and config in {sroot}")
+    if not have_token:
+        print("no token yet: pipe it in (`... install --token-stdin`), pass --token-file, or export MEMSYNC_TOKEN where Claude Code starts")
+    return 0
+
+
+def cmd_uninstall(args):
+    global HEADER
+    purge = "--purge" in args
+    settings_path = cfg_dir() / "settings.json"
+    settings = load_settings(settings_path)
+    before = json.dumps(settings, sort_keys=True)
+    strip_hooks(settings)
+    if json.dumps(settings, sort_keys=True) != before:
+        save_settings(settings_path, settings)
+    try:  # take our header off the global file; the user's own text stays
+        gf = Path(os.path.expanduser(os.environ.get("MEMSYNC_GLOBAL_FILE") or str(cfg_dir() / "CLAUDE.md")))
+        text = gf.read_text(encoding="utf-8")
+        HEADER = LOCAL_HEADER
+        body = strip_header(text)
+        if body != text:
+            gf.write_text(body, encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        pass
+    if purge:
+        shutil.rmtree(str(local_state_root()), ignore_errors=True)
+    print("memsync hooks removed" + (", state and token deleted" if purge else f" (state kept in {local_state_root()}; --purge deletes it)") + ". Memory files were not touched.")
+    return 0
+
+
+def transcript_cwd(pdir_):
+    """cwd recorded in the newest transcripts of a ~/.claude/projects/<slug> dir (the slug itself is lossy)."""
+    files = sorted(pdir_.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
+    for f in files:
+        try:
+            with f.open(encoding="utf-8", errors="replace") as fh:
+                for i, line in enumerate(fh):
+                    if i > 80:
+                        break
+                    if '"cwd"' in line:
+                        try:
+                            c = json.loads(line).get("cwd")
+                        except ValueError:
+                            continue
+                        if isinstance(c, str) and c:
+                            return c
+        except OSError:
+            continue
+    return None
+
+
+def cmd_migrate(args):
+    apply = "--apply" in args
+    base = cfg_dir() / "projects"
+    rows = []
+    for d in sorted(base.iterdir()) if base.is_dir() else []:
+        mem = d / "memory"
+        n = len([p for p in mem.rglob("*.md")]) if mem.is_dir() else 0
+        if not n:
+            continue
+        cwd = transcript_cwd(d)
+        top = find_git_root(cwd) if cwd and os.path.isdir(cwd) else None
+        info = repo_info(top) if top else None
+        rows.append((d.name, mem, n, cwd, info))
+    rc = 0
+    for name, mem, n, cwd, info in rows:
+        if not info:
+            print(f"skip   {name}: {n} file(s), " + ("cwd unknown" if not cwd else "not a git checkout with an origin" if os.path.isdir(cwd) else "cwd no longer exists"))
+            continue
+        if not apply:
+            print(f"would sync {name}: {n} file(s) -> project {info['url']}")
+            continue
+        if not URL_OK():
+            print("migrate: server URL not configured (run install first)", file=sys.stderr)
+            return 2
+        try:
+            local_setup({"cwd": cwd}, root=cwd, native=str(mem))
+            with file_lock(LOCK_PATH, LOCAL_LOCK_TIMEOUT):
+                r = dispatch("pull", "migrate", {"cwd": cwd})
+            print(f"synced {name}: {n} file(s) -> project {info['url']} ({r['changes']} change(s))")
+        except Exception as e:  # noqa: BLE001
+            rc = 1
+            print(f"failed {name}: {describe(e)[1]}", file=sys.stderr)
+    if not apply and rows:
+        print("dry run; add --apply to sync (merge only, nothing is deleted)")
+    return rc
+
+
+def URL_OK():
+    cfg = read_json(local_state_root() / "config.json", {})
+    return bool(os.environ.get("MEMSYNC_URL") or cfg.get("url"))
+
+
+def cmd_where(args):
+    root = os.path.abspath(args[0]) if args else os.getcwd()
+    local_setup({"cwd": root}, root=root)
+    repos, top = local_detect_workspace({"cwd": root})
+    print(json.dumps({"project_root": root, "git_root": top, "project": repos[0]["url"] if repos else None,
+                      "memory_dir": str(MEM), "synced": bool(repos), "state_dir": str(STATE)}, indent=2))
+    return 0
+
+
+def local_admin(cmd, args):
+    try:
+        return {"install": cmd_install, "uninstall": cmd_uninstall, "migrate": cmd_migrate, "where": cmd_where}[cmd](args)
+    except ValueError as e:
+        print(f"{cmd}: {e}", file=sys.stderr)
+        return 1
 
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd in LOCAL_COMMANDS:
+        return local_admin(cmd, sys.argv[2:])
     hook_in = {}
     if not sys.stdin.isatty():
         try:
@@ -873,8 +1390,10 @@ def main():
             pass
     session = os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID") or hook_in.get("session_id") or ""
     if cmd not in ("pull", "push"):
-        print("usage: memsync.py pull|push", file=sys.stderr)
+        print("usage: memsync.py pull|push|install|uninstall|migrate|where", file=sys.stderr)
         return 0
+    if MODE == "local":
+        local_setup(hook_in)
     if not URL:
         # Misconfiguration: say so once per throttle window instead of failing silently.
         st = read_json(NOTIFY, {})
