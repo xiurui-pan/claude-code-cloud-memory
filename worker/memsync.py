@@ -1159,7 +1159,8 @@ def local_first_sync(session, hook_in):
         pd = pdir(projects[0])
         local = local_files()
         srv = {sp[len(pd):]: t for sp, t in server.items() if sp.startswith(pd) and sp != pd + INDEX}
-        taken = set(local) | set(srv) | {INDEX}
+        on_disk = {p.relative_to(MEM).as_posix() for p in MEM.rglob("*") if p.is_file()} if MEM.is_dir() else set()
+        taken = set(local) | set(srv) | {INDEX} | on_disk  # includes files skipped by local_files (oversized, undecodable)
         rename = {}
         for name, text in sorted(local.items()):
             if name != INDEX and name in srv and srv[name] != text:

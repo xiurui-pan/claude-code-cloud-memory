@@ -287,6 +287,17 @@ await t("first sync with an oversized local MEMORY.md: it is moved aside, not ov
   assert(files.some((f) => f !== "MEMORY.md" && fs.readFileSync(path.join(dir, f), "utf8") === big), files.join());
 });
 
+await t("first sync: the name for a preserved local copy skips files that exist on disk but are not uploaded", async () => {
+  const E = machine(); E.install();
+  const big = "x".repeat(250000);
+  E.write(repoA, "deploy.md", "E's version of deploy\n"); // differs from the server: will be kept under another name
+  E.write(repoA, "deploy.local.md", big);                   // oversized: skipped by the uploader, must not be overwritten
+  E.pull(repoA);
+  assert(!srv()[pd(P) + "deploy.local.md"]); assert.equal(E.read(repoA, "deploy.local.md"), big);
+  const dir = E.mem(repoA);
+  assert(E.files(repoA).some((f) => fs.readFileSync(path.join(dir, f), "utf8") === "E's version of deploy\n"), E.files(repoA).join());
+});
+
 // ---------------------------------------------------------------- lock
 await t("file lock: second holder times out, released on exit, O_EXCL fallback works and recovers a stale lock", async () => {
   const lockfile = path.join(TMP, "lk", "lock");
