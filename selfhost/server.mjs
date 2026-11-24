@@ -84,6 +84,25 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const sqlite = new DatabaseSync(DB_PATH);
 sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;");
 sqlite.exec(fs.readFileSync(path.join(HERE, "..", "worker", "schema.sql"), "utf8")); // idempotent (IF NOT EXISTS)
+// Versioned migrations (worker/migrations/NNN_name.sql): each file records itself in schema_version.
+{
+  const dir = path.join(HERE, "..", "worker", "migrations");
+  const applied = sqlite.prepare("SELECT COALESCE(MAX(version), 0) AS v FROM schema_version").get().v;
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => /^\d+_.*\.sql$/.test(f)).sort() : [];
+  for (const f of files) {
+    const version = parseInt(f, 10);
+    if (version <= applied) continue;
+    sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      sqlite.exec(fs.readFileSync(path.join(dir, f), "utf8"));
+      sqlite.exec("COMMIT");
+    } catch (e) {
+      sqlite.exec("ROLLBACK");
+      die(`migration ${f} failed: ${e.message}`);
+    }
+    console.log(`memsync: applied migration ${f}`);
+  }
+}
 
 // ---------- worker bootstrap ----------
 // Workers provide crypto.subtle.timingSafeEqual (used by index.js); Node's WebCrypto does not.

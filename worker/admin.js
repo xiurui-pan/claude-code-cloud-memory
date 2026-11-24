@@ -6,7 +6,8 @@
 // Every write goes through store.js (writeRow: sha guard + history row), session "admin".
 
 import PAGE from "./admin.html";
-import { json, sha256Hex, validPath, writeRow, restoreAt, MAX_FILE_BYTES } from "./store.js";
+import { json, sha256Hex, validPath, writeRow, restoreAt, classify, MAX_FILE_BYTES } from "./store.js";
+import { listProjects, movePath, mergeProjects, setMembership, deleteMembership } from "./layers.js";
 
 const SESSION = "admin";
 const enc = new TextEncoder();
@@ -126,11 +127,51 @@ async function api(req, env, url) {
   }
 
   if (route === "/files" && method === "GET") {
-    const { results } = await env.DB.prepare("SELECT path, content, sha, modified FROM files WHERE deleted = 0 ORDER BY path").all();
+    const { results } = await env.DB.prepare("SELECT path, content, sha, modified, session FROM files WHERE deleted = 0 ORDER BY path").all();
     return json({
-      files: results.map((r) => ({ path: r.path, sha: r.sha, modified: r.modified, size: bytes(r.content), ...parseFrontmatter(r.content) })),
+      files: results.map((r) => ({
+        path: r.path, sha: r.sha, modified: r.modified, size: bytes(r.content), ...parseFrontmatter(r.content),
+        ...classify(r.path),
+        // a sync client routed this new file by a fallback rule (several projects in one session); cleared by any admin write
+        flagged: /\|routed:/.test(r.session || "") ? String(r.session).split("|routed:")[1] : null,
+      })),
+      projects: await listProjects(env),
       now: Date.now(),
     });
+  }
+
+  if (route === "/move" && method === "POST") {
+    const b = await readBody(req);
+    if (isErr(b)) return b;
+    const r = await movePath(env, b.from, b.to, SESSION);
+    return r.error ? json({ error: r.error }, r.status || 400) : json(r);
+  }
+
+  if (route === "/unflag" && method === "POST") {
+    const b = await readBody(req);
+    if (isErr(b)) return b;
+    if (!validPath(b.path)) return json({ error: "bad path" }, 400);
+    await env.DB.prepare("UPDATE files SET session = ? WHERE path = ? AND session LIKE '%|routed:%'").bind(SESSION, b.path).run();
+    return json({ ok: true });
+  }
+
+  if (route === "/merge-project" && method === "POST") {
+    const b = await readBody(req);
+    if (isErr(b)) return b;
+    const r = await mergeProjects(env, b.from, b.into, SESSION);
+    return r.error ? json({ error: r.error }, r.status || 400) : json(r);
+  }
+
+  if (route === "/membership" && method === "PUT") {
+    const b = await readBody(req);
+    if (isErr(b)) return b;
+    const r = await setMembership(env, b.repo, b.pid);
+    return r.error ? json({ error: r.error }, r.status || 400) : json(r);
+  }
+
+  if (route === "/membership" && method === "DELETE") {
+    const r = await deleteMembership(env, q("repo"));
+    return r.error ? json({ error: r.error }, r.status || 400) : json(r);
   }
 
   if (route === "/file" && method === "GET") {
@@ -213,7 +254,7 @@ async function api(req, env, url) {
 const DAY = 864e5;
 export async function syncStatus(env, now = Date.now()) {
   const { results: recent } = await env.DB.prepare(
-    "SELECT id, at, session, event, ok, error, files, cli_version, auto_memory, cwd_name FROM sync_events ORDER BY at DESC, id DESC LIMIT 20"
+    "SELECT id, at, session, event, ok, error, files, cli_version, auto_memory, cwd_name, projects FROM sync_events ORDER BY at DESC, id DESC LIMIT 20"
   ).all();
   const { results: streak } = await env.DB.prepare("SELECT ok FROM sync_events ORDER BY at DESC, id DESC LIMIT 500").all();
   let consecutiveFailures = 0;

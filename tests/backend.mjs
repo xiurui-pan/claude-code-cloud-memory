@@ -17,6 +17,9 @@ export function start({ port, state, vars }) {
   let proc, sql;
   if (BACKEND === "cf") {
     spawnSync("npx", ["wrangler", "d1", "execute", "memsync-test", "--local", "--persist-to", state, "--file", path.join(ROOT, "worker", "schema.sql")], { cwd: HERE, stdio: "ignore" });
+    for (const f of fs.readdirSync(path.join(ROOT, "worker", "migrations")).filter((n) => n.endsWith(".sql")).sort()) {
+      spawnSync("npx", ["wrangler", "d1", "execute", "memsync-test", "--local", "--persist-to", state, "--file", path.join(ROOT, "worker", "migrations", f)], { cwd: HERE, stdio: "ignore" });
+    }
     const args = Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`]);
     proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(port), "--inspector-port", String(port + 100), "--persist-to", state, ...args], { cwd: HERE, detached: true, stdio: ["ignore", "ignore", "inherit"] });
     sql = (q) => JSON.parse(spawnSync("npx", ["wrangler", "d1", "execute", "memsync-test", "--local", "--persist-to", state, "--json", "--command", q], { cwd: HERE, encoding: "utf8" }).stdout)[0].results;

@@ -4,3 +4,7 @@ CREATE INDEX IF NOT EXISTS history_path_at ON history (path, at);
 CREATE INDEX IF NOT EXISTS history_at ON history (at);
 CREATE TABLE IF NOT EXISTS sync_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, session TEXT, event TEXT, ok INTEGER, error TEXT, files INTEGER, cli_version TEXT, auto_memory TEXT, cwd_name TEXT);
 CREATE INDEX IF NOT EXISTS sync_events_at ON sync_events (at);
+CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS repo_membership (repo TEXT PRIMARY KEY, pid TEXT NOT NULL, source TEXT NOT NULL, updated INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS repo_membership_pid ON repo_membership (pid);
+CREATE TABLE IF NOT EXISTS projects (pid TEXT PRIMARY KEY, label TEXT, created INTEGER NOT NULL);

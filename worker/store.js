@@ -3,6 +3,11 @@
 export const INDEX = "MEMORY.md";
 export const MAX_FILE_BYTES = 200_000;
 const PATH_RE = /^[A-Za-z0-9._\-\/]{1,200}\.md$/;
+export const GLOBAL = "global/CLAUDE.md";
+export const NOREPO = "_norepo";
+export const MAX_PID = 180; // "projects/" + pid + "/MEMORY.md" must stay within 200 chars
+// Project id: host/owner/repo, or _norepo.
+const PID_RE = /^(?:_norepo|[a-z0-9][a-z0-9.\-]*(?:\/[a-z0-9._\-]+){2})$/;
 
 export function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
@@ -19,11 +24,33 @@ export async function sha256Hex(text) {
   return [...(await sha256Bytes(text))].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export function validPath(p) {
-  return typeof p === "string" && PATH_RE.test(p) && !p.includes("..") && !p.startsWith("/") && !p.includes("//");
+export function validPid(p) {
+  return typeof p === "string" && p.length <= MAX_PID && PID_RE.test(p) && !p.includes("..") && !p.includes("//");
 }
 
-// Apply a 3-way line diff for MEMORY.md: drop the lines the client removed,
+// Legacy root files (no prefix) keep the original rules. Layered paths are exactly
+// global/CLAUDE.md and projects/<pid>/<file>.md (project files are direct children).
+export function validPath(p) {
+  if (!(typeof p === "string" && PATH_RE.test(p) && !p.includes("..") && !p.startsWith("/") && !p.includes("//"))) return false;
+  if (p.startsWith("global/")) return p === GLOBAL;
+  if (p.startsWith("projects/")) {
+    const m = p.match(/^projects\/(.+)\/([^/]+\.md)$/);
+    return !!m && validPid(m[1]);
+  }
+  return true;
+}
+
+// Paths that get the 3-way line merge: every MEMORY.md index and the global CLAUDE.md.
+export const isMergePath = (p) => p === GLOBAL || p.split("/").pop() === INDEX;
+
+// Where a path lives: {layer: "global"} | {layer: "project", pid, file} | {layer: "legacy"}.
+export function classify(p) {
+  if (p === GLOBAL) return { layer: "global" };
+  const m = p.match(/^projects\/(.+)\/([^/]+\.md)$/);
+  return m ? { layer: "project", pid: m[1], file: m[2] } : { layer: "legacy" };
+}
+
+// Apply a 3-way line diff for MEMORY.md indexes and global/CLAUDE.md: drop the lines the client removed,
 // append the lines the client added, keep everything other sessions wrote.
 export function mergeIndex(serverText, added, removed) {
   const removedSet = new Set((removed || []).map((l) => l.trimEnd()));
@@ -82,7 +109,7 @@ export async function applyOne(env, f, session) {
     let status = "written";
     if (liveSha !== null && liveSha !== base) {
       // Someone else changed it since this client pulled.
-      if (path === INDEX && cur) {
+      if (isMergePath(path) && cur) {
         content = mergeIndex(cur.content, f.added_lines, f.removed_lines);
         status = "merged";
       } else {
@@ -129,10 +156,11 @@ export async function recordStatus(env, b) {
   let at = Number(b.at);
   if (!Number.isFinite(at) || at < now - 7 * 864e5 || at > now + 60e3) at = now; // queued events keep their time
   const files = Number.isFinite(Number(b.files)) ? Math.max(0, Math.min(1e6, Math.trunc(Number(b.files)))) : 0;
+  const projects = Array.isArray(b.projects) ? b.projects.map(String).join(",") : b.projects;
   await env.DB.prepare(
-    "INSERT INTO sync_events (at, session, event, ok, error, files, cli_version, auto_memory, cwd_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO sync_events (at, session, event, ok, error, files, cli_version, auto_memory, cwd_name, projects) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
   ).bind(at, clip(b.session, 100), b.event, b.ok ? 1 : 0, clip(b.error, 200), files,
-    clip(b.cli_version, 40), clip(b.auto_memory, 60), clip(b.cwd_name, 100)).run();
+    clip(b.cli_version, 40), clip(b.auto_memory, 60), clip(b.cwd_name, 100), clip(projects, 400)).run();
   await env.DB.prepare("DELETE FROM sync_events WHERE id <= (SELECT MAX(id) FROM sync_events) - ?").bind(KEEP_EVENTS).run();
   return null;
 }

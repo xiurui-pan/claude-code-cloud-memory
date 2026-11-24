@@ -5,8 +5,11 @@
 // Routes
 //   GET  /health                 public
 //   GET  /client/memsync.py      public: the hook client (contains no secrets)
-//   GET  /v1/pull                all live files
-//   POST /v1/push                per-file changes, guarded by base_sha
+//   GET  /v1/pull                no params: legacy root files only (old clients)
+//   GET  /v1/pull?projects=<pid>,<pid>&global=1   global/CLAUDE.md + those projects' files
+//   POST /v1/resolve {repos:[{url, submodules:[url]}]}   learn submodule membership, -> {projects, map}
+//   POST /v1/push                per-file changes (full server paths), guarded by base_sha
+//   POST /v1/move {from,to}  /  POST /v1/move-prefix {from_prefix,to_prefix}   history-preserving moves
 //   GET  /v1/history?path=&limit=&content=1
 //   POST /v1/restore {at: epoch_ms}   restore every file to its state at that time
 //   POST /v1/status {session,event,ok,error,files,cli_version,auto_memory,cwd_name}  client sync report
@@ -15,6 +18,7 @@
 
 import CLIENT from "./memsync.py";
 import { MAX_FILE_BYTES, json, sha256Bytes, validPath, applyOne, restoreAt, recordStatus } from "./store.js";
+import { resolveRepos, pullFiles, parsePullParams, movePath, movePrefix } from "./layers.js";
 import { handleAdmin } from "./admin.js";
 
 const MAX_FILES_PER_PUSH = 500;
@@ -30,7 +34,10 @@ export default {
       }
       if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return await handleAdmin(req, env, url);
       if (!(await authorized(req, env))) return json({ error: "unauthorized" }, 401);
-      if (req.method === "GET" && url.pathname === "/v1/pull") return await pull(env);
+      if (req.method === "GET" && url.pathname === "/v1/pull") return await pull(env, url);
+      if (req.method === "POST" && url.pathname === "/v1/resolve") return await resolve(req, env);
+      if (req.method === "POST" && url.pathname === "/v1/move") return await move(req, env);
+      if (req.method === "POST" && url.pathname === "/v1/move-prefix") return await moveByPrefix(req, env);
       if (req.method === "POST" && url.pathname === "/v1/push") return await push(req, env);
       if (req.method === "GET" && url.pathname === "/v1/history") return await history(url, env);
       if (req.method === "POST" && url.pathname === "/v1/restore") return await restore(req, env);
@@ -64,11 +71,35 @@ async function authorized(req, env) {
 }
 
 
-async function pull(env) {
-  const { results } = await env.DB.prepare(
-    "SELECT path, content, sha, modified FROM files WHERE deleted = 0 ORDER BY path"
-  ).all();
-  return json({ files: results, now: Date.now() });
+async function pull(env, url) {
+  const p = parsePullParams(url);
+  if (p.error) return json({ error: p.error }, 400);
+  return json({ files: await pullFiles(env, p), now: Date.now() });
+}
+
+async function resolve(req, env) {
+  const body = await req.json().catch(() => null);
+  if (!body) return json({ error: "bad json" }, 400);
+  try {
+    return json(await resolveRepos(env, body.repos));
+  } catch (e) {
+    if (e && e.status) return json({ error: e.message }, e.status);
+    throw e;
+  }
+}
+
+const reply = (r) => (r.error ? json({ error: r.error, ...(r.moved ? { moved: r.moved } : {}) }, r.status || 400) : json(r));
+
+async function move(req, env) {
+  const b = await req.json().catch(() => null);
+  if (!b) return json({ error: "bad json" }, 400);
+  return reply(await movePath(env, b.from, b.to, "move"));
+}
+
+async function moveByPrefix(req, env) {
+  const b = await req.json().catch(() => null);
+  if (!b) return json({ error: "bad json" }, 400);
+  return reply(await movePrefix(env, b.from_prefix, b.to_prefix, "move"));
 }
 
 
@@ -87,7 +118,8 @@ async function push(req, env) {
       results.push({ path: f.path, status: "rejected_size" });
       continue;
     }
-    results.push(await applyOne(env, f, session));
+    const tag = typeof f.routed_by === "string" && f.routed_by ? `${session || ""}|routed:${f.routed_by}`.slice(0, 160) : session;
+    results.push(await applyOne(env, f, tag));
   }
   return json({ results, now: Date.now() });
 }

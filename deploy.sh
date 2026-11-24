@@ -87,6 +87,16 @@ fi
 jq -n --rawfile sql worker/schema.sql '{sql: $sql}' \
   | cf -X POST "$API/accounts/$A/d1/database/$DB/query" -H 'content-type: application/json' -d @- >/dev/null
 echo "schema applied"
+# Versioned migrations: worker/migrations/NNN_name.sql, each file inserts its own schema_version row.
+d1_query() { jq -n --arg sql "$1" '{sql: $sql}' | cf -X POST "$API/accounts/$A/d1/database/$DB/query" -H 'content-type: application/json' -d @-; }
+APPLIED=$(d1_query "SELECT COALESCE(MAX(version), 0) AS v FROM schema_version" | jq -r '.result[0].results[0].v // 0')
+for f in worker/migrations/[0-9]*.sql; do
+  [ -e "$f" ] || continue
+  N=$((10#$(basename "$f" | sed 's/_.*//')))
+  [ "$N" -gt "$APPLIED" ] || continue
+  d1_query "$(cat "$f")" | jq -e '.success' >/dev/null || { echo "migration $f failed" >&2; exit 1; }
+  echo "migration $(basename "$f") applied"
+done
 
 # ---- Worker ----
 META=$(jq -n --arg db "$DB" --arg h "${TOKEN_SHA256:-}" --argjson keep "$KEEP_TOKEN" \
@@ -100,6 +110,7 @@ cf -X PUT "$API/accounts/$A/workers/scripts/$WORKER_NAME" \
   -F "metadata=$META;type=application/json" \
   -F "index.js=@worker/index.js;type=application/javascript+module" \
   -F "store.js=@worker/store.js;type=application/javascript+module" \
+  -F "layers.js=@worker/layers.js;type=application/javascript+module" \
   -F "admin.js=@worker/admin.js;type=application/javascript+module" \
   -F "admin.html=@worker/admin.html;type=text/plain" \
   -F "memsync.py=@worker/memsync.py;type=text/plain" | jq -c '.result | {id, modified_on}'
