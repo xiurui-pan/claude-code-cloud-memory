@@ -281,6 +281,13 @@ except m.LockTimeout:
     print("timeout")`, { MEMSYNC_LOCK_BACKEND: backend });
     assert.equal(r.stdout.trim(), "timeout", backend + " " + r.stderr);
     assert(Date.now() - t0 < 2000);
+    const rAgain = pyEval(`
+try:
+    with m.file_lock(${JSON.stringify(lockfile)}, 0.2):
+        print("got")
+except m.LockTimeout:
+    print("timeout")`, { MEMSYNC_LOCK_BACKEND: backend });
+    assert.equal(rAgain.stdout.trim(), "timeout", backend + ": a timed-out waiter must not free the holder's lock");
     await new Promise((res) => holder.on("close", res));
     const r2 = pyEval(`
 with m.file_lock(${JSON.stringify(lockfile)}, 2):

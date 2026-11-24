@@ -864,7 +864,7 @@ def file_lock(path, timeout=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = None if timeout is None else time.time() + timeout
-    fd, excl = None, None
+    fd, excl, owned = None, None, False
     try:
         fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
         while True:
@@ -876,6 +876,7 @@ def file_lock(path, timeout=None):
                 while True:
                     try:
                         os.close(os.open(str(excl), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                        owned = True
                         break
                     except FileExistsError:
                         try:
@@ -905,7 +906,7 @@ def file_lock(path, timeout=None):
             except OSError:
                 pass
             os.close(fd)
-        if excl is not None:
+        if owned:  # a waiter that timed out must not remove the holder's lock file
             try:
                 excl.unlink()
             except OSError:
