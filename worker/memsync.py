@@ -1170,6 +1170,10 @@ def local_first_sync(session, hook_in):
             layout["files"][name] = pd + name
         sidx = server.get(pd + INDEX, "")
         merged = union_lines(sidx, link_rewrite_text(local[INDEX], rename)) if INDEX in local else sidx
+        if INDEX not in local and merged and (MEM / INDEX).exists():  # unreadable or oversized local index: move it aside
+            aside = unique_local_name(INDEX, taken)
+            taken.add(aside)
+            os.replace(str(MEM / INDEX), str(MEM / aside))
         if merged or INDEX in local:
             write_local(INDEX, merged)
         if pd + INDEX in server:
