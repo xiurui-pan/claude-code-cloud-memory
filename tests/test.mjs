@@ -1,6 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { start, up, BACKEND } from "./backend.mjs";
 import assert from "node:assert";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,13 +19,10 @@ function tok(over = {}, key = good.privateKey, kid = "k1") {
   const sig = crypto.sign("sha256", Buffer.from(h + "." + b), key);
   return h + "." + b + "." + b64u(sig);
 }
-const spawnW = (port, vars) => spawn("npx", ["wrangler", "dev", "--local", "--port", String(port), "--inspector-port", String(port+100), "--persist-to", STATE, ...vars.flatMap((v) => ["--var", v])], { cwd: HERE, detached: true, stdio: ["ignore", "ignore", "inherit"] });
-async function up(port) { for (let i = 0; i < 120; i++) { try { await fetch(`http://127.0.0.1:${port}/health`); return; } catch { await new Promise((r) => setTimeout(r, 500)); } } throw new Error("no start"); }
-// fresh DB each run
-import fs from "node:fs"; fs.rmSync(STATE, { recursive: true, force: true });
-spawnSync("npx", ["wrangler", "d1", "execute", "memsync-test", "--local", "--persist-to", STATE, "--file", path.join(HERE, "..", "worker", "schema.sql")], { cwd: HERE, stdio: "ignore" });
-const w1 = spawnW(8801, [`ACCESS_TEAM_DOMAIN:${TEAM}`, `ACCESS_AUD:${AUD}`, "TOKEN_SHA256:" + crypto.createHash("sha256").update("sekret").digest("hex")]);
-const w2 = spawnW(8802, ["ACCESS_TEAM_DOMAIN:", "ACCESS_AUD:", "TOKEN_SHA256:" + crypto.createHash("sha256").update("sekret").digest("hex")]);
+const SHA = crypto.createHash("sha256").update("sekret").digest("hex");
+const w1 = start({ port: 8801, state: STATE, vars: { ACCESS_TEAM_DOMAIN: TEAM, ACCESS_AUD: AUD, TOKEN_SHA256: SHA } });
+const w2 = start({ port: 8802, state: STATE + "-unconfigured", vars: { ACCESS_TEAM_DOMAIN: "", ACCESS_AUD: "", TOKEN_SHA256: SHA } });
+console.log("backend:", BACKEND);
 await up(8801); await up(8802);
 const B = "http://127.0.0.1:8801";
 let pass = 0, fail = 0;
@@ -126,6 +123,6 @@ await t("restore-all (admin + /v1/restore)", async () => {
   const r2 = await (await fetch(B + "/v1/restore", { method: "POST", headers: bearer, body: JSON.stringify({ at }) })).json();
   assert.deepEqual(r2.changed, []);
 });
-for (const w of [w1, w2]) try { process.kill(-w.pid, "SIGKILL"); } catch {}
+w1.stop(); w2.stop();
 jwks.close();
 console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);

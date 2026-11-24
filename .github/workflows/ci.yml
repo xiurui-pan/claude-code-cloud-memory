@@ -19,11 +19,20 @@ jobs:
           python-version: "3.12"
       - name: Syntax checks
         run: |
-          for f in worker/index.js worker/store.js worker/admin.js tests/test.mjs tests/test2.mjs tests/run.mjs; do node --check "$f"; done
+          for f in worker/index.js worker/store.js worker/admin.js selfhost/server.mjs selfhost/text-loader.mjs tests/backend.mjs tests/test.mjs tests/test2.mjs tests/test3.mjs tests/run.mjs; do node --check "$f"; done
           python -m py_compile worker/memsync.py
           bash -n deploy.sh
           bash -n setup-script.template.sh
+          bash -n selfhost/render-setup-script.sh
           awk 'length > 200 { print FILENAME ": line " NR " is longer than 200 chars"; bad = 1 } END { exit bad }' setup-script.template.sh
       - run: npm install --no-audit --no-fund
-      - name: Tests (wrangler dev --local)
-        run: npm test
+      - name: Tests on Cloudflare runtime (wrangler dev --local)
+        run: BACKEND=cf npm test
+      - name: Tests on self-host runtime (Node + node:sqlite)
+        run: BACKEND=node npm test
+      - name: Docker image builds and answers /health
+        run: |
+          docker build -f selfhost/Dockerfile -t claude-memory-ci .
+          docker run -d --name memci -p 8787:8787 -e TOKEN_SHA256="$(printf ci | sha256sum | cut -d' ' -f1)" claude-memory-ci
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8787/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8787/health

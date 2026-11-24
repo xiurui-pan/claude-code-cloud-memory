@@ -1,4 +1,8 @@
-// Admin UI + API. Auth is a Cloudflare Access JWT verified here (fail closed).
+// Admin UI + API. Auth is one of three modes, picked by env (fail closed):
+//   Cloudflare Access JWT  ACCESS_TEAM_DOMAIN + ACCESS_AUD                (Cloudflare deployment)
+//   Self-host login        ADMIN_TOKEN_SHA256 (+ ADMIN_SESSION_SECRET, ADMIN_COOKIE_SECURE)
+//   Trusted proxy header   ADMIN_TRUST_PROXY_HEADER=<header name>         (self-host behind an auth proxy)
+// Setting more than one mode is a misconfiguration and every /admin request is refused.
 // Every write goes through store.js (writeRow: sha guard + history row), session "admin".
 
 import PAGE from "./admin.html";
@@ -246,6 +250,130 @@ export async function syncStatus(env, now = Date.now()) {
   return { now, recent, last_success: last ? last.at : null, consecutive_failures: consecutiveFailures, versions, health };
 }
 
+// ---------- self-host auth: login session + trusted proxy header ----------
+const SESSION_COOKIE = "memsync_admin";
+const SESSION_TTL_MS = 12 * 3600_000;
+const MAX_FAILS = 10; // failed logins per minute, process-wide
+const revoked = new Map(); // nonce -> exp, so logout kills the cookie even if it was copied
+let fails = [];
+let procSecret = null;
+const hmacKeys = new Map();
+
+function b64uEnc(buf) {
+  let s = "";
+  for (const b of new Uint8Array(buf)) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function hexBytes(hex) {
+  if (!/^[0-9a-f]{64}$/i.test(hex || "")) return null;
+  return Uint8Array.from(hex.match(/../g), (h) => parseInt(h, 16));
+}
+
+function ctEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a[i] ^ b[i];
+  return d === 0;
+}
+
+async function sessionKey(env) {
+  let secret = env.ADMIN_SESSION_SECRET;
+  if (!secret) {
+    // No configured secret: sessions last until the process restarts.
+    procSecret ||= b64uEnc(crypto.getRandomValues(new Uint8Array(32)));
+    secret = procSecret;
+  }
+  if (!hmacKeys.has(secret)) {
+    hmacKeys.set(secret, await crypto.subtle.importKey("raw", enc.encode("memsync-admin-session-v1\n" + secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]));
+  }
+  return hmacKeys.get(secret);
+}
+
+async function newSessionCookie(env, now = Date.now()) {
+  const body = `${now + SESSION_TTL_MS}.${b64uEnc(crypto.getRandomValues(new Uint8Array(16)))}`;
+  const sig = await crypto.subtle.sign("HMAC", await sessionKey(env), enc.encode(body));
+  return `${body}.${b64uEnc(sig)}`;
+}
+
+// Returns {nonce, exp} for a valid, unexpired, unrevoked session cookie, else null.
+async function readSession(req, env) {
+  const m = (req.headers.get("cookie") || "").match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
+  if (!m) return null;
+  const parts = m[1].split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const ok = await crypto.subtle.verify("HMAC", await sessionKey(env), b64u(parts[2]), enc.encode(parts[0] + "." + parts[1]));
+    if (!ok) return null;
+    const exp = Number(parts[0]);
+    const now = Date.now();
+    if (!Number.isFinite(exp) || exp <= now) return null;
+    for (const [n, e] of revoked) if (e <= now) revoked.delete(n);
+    if (revoked.has(parts[1])) return null;
+    return { nonce: parts[1], exp };
+  } catch {
+    return null;
+  }
+}
+
+function cookieHeader(env, value, maxAgeSec) {
+  const secure = !/^(0|false|no|off)$/i.test(String(env.ADMIN_COOKIE_SECURE ?? "1"));
+  return `${SESSION_COOKIE}=${value}; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSec}${secure ? "; Secure" : ""}`;
+}
+
+const PAGE_HEADERS = { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "referrer-policy": "no-referrer" };
+
+function loginPage(lang, status = 200, error = "") {
+  const t = TEXT[lang];
+  const other = lang === "zh" ? "en" : "zh";
+  const html = `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${HTML_ESC(t.loginTitle)}</title>
+<style>:root{color-scheme:light dark}body{font:15px/1.6 system-ui,sans-serif;max-width:380px;margin:12vh auto;padding:0 16px}input,button{font:inherit;padding:8px 10px;width:100%;box-sizing:border-box;margin-top:8px}.err{color:#c33}a{float:right}</style></head>
+<body><a href="?lang=${other}">${HTML_ESC(TEXT[other].other)}</a><h1>${HTML_ESC(t.loginTitle)}</h1><p>${HTML_ESC(t.loginBody)}</p>${error ? `<p class="err">${HTML_ESC(error)}</p>` : ""}
+<form method="post" action="/admin/login?lang=${lang}"><label>${HTML_ESC(t.tokenLabel)}<input type="password" name="token" autocomplete="current-password" required autofocus></label><button type="submit">${HTML_ESC(t.loginBtn)}</button></form></body></html>`;
+  return new Response(html, { status, headers: PAGE_HEADERS });
+}
+
+const LOGOUT_FORM = '<form method="post" action="/admin/logout" style="display:contents"><button type="submit" data-i="logout"></button></form>';
+const redirect = (to, cookie) => new Response(null, { status: 303, headers: { location: to, "cache-control": "no-store", ...(cookie ? { "set-cookie": cookie } : {}) } });
+const plain = (text, status) => new Response(text, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
+
+// Handles /admin/login and /admin/logout in self-host login mode. Returns null for any other path.
+async function loginRoutes(req, env, url, lang) {
+  const isLogin = url.pathname === "/admin/login";
+  if (!isLogin && url.pathname !== "/admin/logout") return null;
+  if (req.method !== "POST") return redirect("/admin?lang=" + lang);
+  const origin = req.headers.get("origin");
+  if (origin && origin !== url.origin) return json({ error: "bad origin" }, 403);
+
+  if (!isLogin) {
+    const s = await readSession(req, env);
+    if (s) revoked.set(s.nonce, s.exp);
+    return redirect("/admin?lang=" + lang, cookieHeader(env, "", 0));
+  }
+
+  const now = Date.now();
+  fails = fails.filter((t) => t > now - 60_000);
+  if (fails.length >= MAX_FAILS) return loginPage(lang, 429, TEXT[lang].tooMany);
+  const given = new URLSearchParams(await req.text().catch(() => "")).get("token") || "";
+  const got = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(given)));
+  const want = hexBytes(env.ADMIN_TOKEN_SHA256);
+  if (!want || !ctEqual(got, want)) {
+    fails.push(now);
+    console.error("admin: login failed");
+    return loginPage(lang, 401, TEXT[lang].badToken);
+  }
+  return redirect("/admin?lang=" + lang, cookieHeader(env, await newSessionCookie(env, now), SESSION_TTL_MS / 1000));
+}
+
+function adminMode(env) {
+  const modes = [];
+  if (env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) modes.push("access");
+  if (env.ADMIN_TOKEN_SHA256) modes.push("token");
+  if (env.ADMIN_TRUST_PROXY_HEADER) modes.push("proxy");
+  if (modes.length > 1) return "conflict";
+  return modes[0] || null; // null: no mode configured, keep the original Access flow (403 helper page)
+}
+
 // ---------- entry ----------
 const HTML_ESC = (x) => String(x).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
@@ -263,6 +391,15 @@ const TEXT = {
     steps: "Create a self-hosted Access application for this hostname with path /admin, then set ACCESS_TEAM_DOMAIN and ACCESS_AUD in deploy.env and run ./deploy.sh again.",
     detected: "Cloudflare Access login detected (shown for setup only, not verified):",
     denied: "Cloudflare Access authentication failed.",
+    deniedProxy: "Authentication required: the reverse proxy did not send the expected identity header.",
+    conflict: "Admin auth is misconfigured: set only one of Cloudflare Access, ADMIN_TOKEN_SHA256 and ADMIN_TRUST_PROXY_HEADER.",
+    loginTitle: "Admin login",
+    loginBody: "Enter the admin token.",
+    tokenLabel: "Admin token",
+    loginBtn: "Log in",
+    badToken: "Wrong token.",
+    tooMany: "Too many failed attempts. Try again in a minute.",
+    needLogin: "Login required.",
     other: "中文",
   },
   zh: {
@@ -271,6 +408,15 @@ const TEXT = {
     steps: "为本主机名创建一个 Self-hosted Access 应用，路径填 /admin，然后把 ACCESS_TEAM_DOMAIN 和 ACCESS_AUD 写进 deploy.env，重新运行 ./deploy.sh。",
     detected: "检测到 Cloudflare Access 登录信息（仅用于配置，尚未校验）：",
     denied: "未通过 Cloudflare Access 身份验证。",
+    deniedProxy: "需要先通过身份验证：反向代理没有发送预期的身份 header。",
+    conflict: "管理后台的认证配置有冲突：Cloudflare Access、ADMIN_TOKEN_SHA256、ADMIN_TRUST_PROXY_HEADER 只能设置其中一个。",
+    loginTitle: "管理后台登录",
+    loginBody: "请输入 admin token。",
+    tokenLabel: "Admin token",
+    loginBtn: "登录",
+    badToken: "token 不对。",
+    tooMany: "失败次数过多，请一分钟后再试。",
+    needLogin: "需要先登录。",
     other: "English",
   },
 };
@@ -286,29 +432,48 @@ function notConfiguredPage(lang, hint) {
 
 export async function handleAdmin(req, env, url) {
   const lang = pickLang(req, url);
-  if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) {
-    // Setup helper: once the Access app exists, Access forwards its JWT here even though the
-    // Worker can't verify it yet. Show (never trust) its aud/iss so the owner can copy them.
-    let hint = "";
-    try {
-      const m = (req.headers.get("cookie") || "").match(/(?:^|;\s*)CF_Authorization=([^;]+)/);
-      const tok = req.headers.get("cf-access-jwt-assertion") || (m && m[1]);
-      if (tok) {
-        const p = parseJson(tok.split(".")[1]);
-        const aud = Array.isArray(p.aud) ? p.aud.join(", ") : String(p.aud || "");
-        hint = `ACCESS_AUD = ${aud}\nACCESS_TEAM_DOMAIN = ${p.iss || ""}`;
-      }
-    } catch {}
-    return notConfiguredPage(lang, hint);
+  const mode = adminMode(env);
+  if (mode === "conflict") {
+    console.error("admin: more than one admin auth mode configured");
+    return plain(TEXT[lang].conflict, 403);
   }
-  const claims = await verifyAccess(req, env);
-  if (!claims) console.error(`admin: access check failed for ${req.method} ${url.pathname}`);
-  if (!claims) return new Response(TEXT[lang].denied, { status: 403, headers: { "content-type": "text/plain; charset=utf-8" } });
+  const isPage = url.pathname === "/admin" || url.pathname === "/admin/";
+  if (mode === "token") {
+    const early = await loginRoutes(req, env, url, lang);
+    if (early) return early;
+    if (!(await readSession(req, env))) {
+      return isPage && req.method === "GET" ? loginPage(lang, 401) : json({ error: TEXT[lang].needLogin }, 401);
+    }
+  } else if (mode === "proxy") {
+    if (!(req.headers.get(env.ADMIN_TRUST_PROXY_HEADER) || "").trim()) {
+      console.error(`admin: proxy header missing for ${req.method} ${url.pathname}`);
+      return plain(TEXT[lang].deniedProxy, 403);
+    }
+  } else {
+    if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) {
+      // Setup helper: once the Access app exists, Access forwards its JWT here even though the
+      // Worker can't verify it yet. Show (never trust) its aud/iss so the owner can copy them.
+      let hint = "";
+      try {
+        const m = (req.headers.get("cookie") || "").match(/(?:^|;\s*)CF_Authorization=([^;]+)/);
+        const tok = req.headers.get("cf-access-jwt-assertion") || (m && m[1]);
+        if (tok) {
+          const p = parseJson(tok.split(".")[1]);
+          const aud = Array.isArray(p.aud) ? p.aud.join(", ") : String(p.aud || "");
+          hint = `ACCESS_AUD = ${aud}\nACCESS_TEAM_DOMAIN = ${p.iss || ""}`;
+        }
+      } catch {}
+      return notConfiguredPage(lang, hint);
+    }
+    const claims = await verifyAccess(req, env);
+    if (!claims) console.error(`admin: access check failed for ${req.method} ${url.pathname}`);
+    if (!claims) return new Response(TEXT[lang].denied, { status: 403, headers: { "content-type": "text/plain; charset=utf-8" } });
+  }
   if (url.pathname === "/admin" || url.pathname === "/admin/") {
     if (req.method !== "GET") return json({ error: "method not allowed" }, 405);
-    return new Response(PAGE, {
-      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "referrer-policy": "no-referrer" },
-    });
+    // Only the self-host login mode has a session to end, so only it gets the logout button.
+    const page = mode === "token" ? PAGE.replace("<!--SELFHOST_LOGOUT-->", LOGOUT_FORM) : PAGE;
+    return new Response(page, { headers: PAGE_HEADERS });
   }
   if (url.pathname.startsWith("/admin/api/")) return await api(req, env, url);
   return json({ error: "not found" }, 404);

@@ -2,11 +2,15 @@
   "name": "claude-code-cloud-memory",
   "version": "0.1.0",
   "private": true,
-  "description": "Persistent auto-memory for Claude Code cloud sessions, synced to a Cloudflare Worker + D1",
+  "type": "module",
+  "description": "Persistent auto-memory for Claude Code cloud sessions, synced to a Cloudflare Worker + D1 (or a self-hosted Node server)",
   "license": "MIT",
   "scripts": {
     "test": "node tests/run.mjs",
-    "check": "node --check worker/index.js && node --check worker/store.js && node --check worker/admin.js && python3 -m py_compile worker/memsync.py"
+    "check": "node --check worker/index.js && node --check worker/store.js && node --check worker/admin.js && node --check selfhost/server.mjs && node --check selfhost/text-loader.mjs && python3 -m py_compile worker/memsync.py",
+    "selfhost": "node --disable-warning=ExperimentalWarning selfhost/server.mjs",
+    "test:cf": "BACKEND=cf node tests/run.mjs",
+    "test:node": "BACKEND=node node tests/run.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

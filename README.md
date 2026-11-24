@@ -2,15 +2,16 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Persistent, cross-session memory for Claude Code **cloud sessions** (claude.ai/code), backed by a Cloudflare Worker + D1 that you host yourself.
+Persistent, cross-session memory for Claude Code **cloud sessions** (claude.ai/code), backed by a server that you host yourself: a Cloudflare Worker + D1 (recommended), or the same code on a small Node server ([self-hosted](#self-hosting-alternative)).
 
-Cloud sessions run in a fresh container each time and ship with native auto-memory turned off. This project turns native auto-memory back on in the container and syncs the memory directory to your Worker: memory is pulled when a session starts and pushed when a reply finishes. The memory format, loading and write rules are exactly Claude Code's native ones, and one memory store is shared across all projects and sessions.
+Cloud sessions run in a fresh container each time and ship with native auto-memory turned off. This project turns native auto-memory back on in the container and syncs the memory directory to your server: memory is pulled when a session starts and pushed when a reply finishes. The memory format, loading and write rules are exactly Claude Code's native ones, and one memory store is shared across all projects and sessions.
 
 Features:
 
 - Native auto-memory (`MEMORY.md` index + one `.md` file per memory), nothing custom on the model side.
 - Server with optimistic concurrency, per-file last-writer-wins, 3-way line merge for `MEMORY.md`, full history and restore.
-- Admin UI (browser) behind Cloudflare Access: view, edit, create, delete, per-file history, whole-store rollback, sync-status panel. English and Chinese.
+- Admin UI (browser) behind Cloudflare Access, or behind a token login when self-hosted: view, edit, create, delete, per-file history, whole-store rollback, sync-status panel. English and Chinese.
+- Runs on Cloudflare (recommended) or self-hosted (Docker or Node 22+, SQLite); both run the same `worker/*.js`.
 - The access token never appears in environment variables, URLs or repos (it is a cloud-environment network secret).
 - Errors are visible: hook `systemMessage` in the chat, the admin status panel, Workers Logs.
 
@@ -54,15 +55,19 @@ These are the findings the design rests on. They come from reading the Claude Co
 
 | Path | Purpose |
 |---|---|
-| `worker/index.js` | Worker entry: bearer auth, pull, push, history, restore, status; routes `/admin*` to `admin.js` |
+| `worker/index.js` | Worker entry (the self-host server runs it unchanged): bearer auth, pull, push, history, restore, status; routes `/admin*` to `admin.js` |
 | `worker/store.js` | Shared write path: `writeRow` (sha optimistic lock + history row), `applyOne`, `restoreAt`, `recordStatus` |
-| `worker/admin.js`, `worker/admin.html` | Admin UI: Access JWT verification, `/admin/api/*`, single-file frontend (EN/中文) |
+| `worker/admin.js`, `worker/admin.html` | Admin UI: Access JWT verification, self-host login session or proxy-header auth, `/admin/api/*`, single-file frontend (EN/中文) |
 | `worker/memsync.py` | Hook client (Python standard library only). Served publicly at `/client/memsync.py`, contains no secrets |
 | `worker/schema.sql` | D1 schema (`files`, `history`, `sync_events`) |
 | `deploy.sh` | Deploys D1, schema, Worker and optional custom domain through the Cloudflare REST API |
 | `deploy.env.example` | Deployment settings template (copy to `deploy.env`, which is gitignored) |
 | `setup-script.template.sh` | Environment setup script template; `deploy.sh` fills in your URL |
-| `tests/` | Local test harness (`wrangler dev --local`), run with `npm test` |
+| `selfhost/server.mjs` | Self-host runtime: D1 shim over `node:sqlite` plus a `node:http` adapter around the Worker's `fetch()` |
+| `selfhost/text-loader.mjs` | Node module hook that loads `memsync.py` and `admin.html` as string modules (what Text modules are on Cloudflare) |
+| `selfhost/Dockerfile`, `selfhost/docker-compose.yml`, `selfhost/env.example` | Container image, compose file (with a commented Caddy example), settings template |
+| `selfhost/render-setup-script.sh` | Fills your URL into the setup script template (the self-host counterpart of what `deploy.sh` does) |
+| `tests/` | Test harness, run with `npm test` against `wrangler dev --local` and against the self-host server (`BACKEND=cf` or `BACKEND=node` for one of them) |
 
 ## Quick start
 
@@ -127,6 +132,109 @@ curl -sS https://memory.example.com/v1/pull | jq -r '.files[] | "== \(.path)\n\(
 
 Start another session: the memory is loaded at the start. Also check that the system prompt of the new session mentions the auto-memory directory `/root/memory/`; if it does not, the switch did not take effect (see [Troubleshooting](#troubleshooting)).
 
+## Self-hosting (alternative)
+
+For this project, Cloudflare is the recommended way to run the server. It is tiny, the free tier covers it, and there is no machine, TLS certificate or backup job to look after. Self-hosting is for people who want everything on their own box: it runs the same `worker/*.js` on Node 22+ with a SQLite file, so the merge and concurrency rules exist in one copy only.
+
+Requirements: a host with Docker (or Node 22+), and a **public domain with a valid TLS certificate**. Cloud sessions reach the server from Anthropic's infrastructure through the egress proxy, so `localhost`, LAN addresses and plain HTTP do not work.
+
+### 1. Generate tokens and hashes
+
+The server stores only hashes. You need two different tokens: the sync token (goes into the cloud environment as the network secret) and an admin token (typed into the admin login form).
+
+```bash
+SYNC_TOKEN=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
+ADMIN_TOKEN=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
+echo "sync token:  $SYNC_TOKEN"     # save both now; the hashes cannot be turned back into tokens
+echo "admin token: $ADMIN_TOKEN"
+cat > selfhost/.env <<EOF
+TOKEN_SHA256=$(printf %s "$SYNC_TOKEN" | sha256sum | cut -d' ' -f1)
+ADMIN_TOKEN_SHA256=$(printf %s "$ADMIN_TOKEN" | sha256sum | cut -d' ' -f1)
+ADMIN_SESSION_SECRET=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
+PUBLIC_URL=https://memory.example.com
+EOF
+```
+
+On macOS use `shasum -a 256` instead of `sha256sum`. `selfhost/.env` is gitignored; `selfhost/env.example` lists every setting.
+
+### 2. Start it
+
+```bash
+docker compose -f selfhost/docker-compose.yml --env-file selfhost/.env up -d --build
+curl -sS http://127.0.0.1:8787/health      # {"ok":true}
+```
+
+The container runs as a non-root user and keeps the SQLite database in the `memory-data` volume (`/data/memory.db`). Without Docker: `TOKEN_SHA256=<hash> npm run selfhost` (Node 22+, no `npm install` needed; data goes to `./data/memory.db`).
+
+### 3. Put it behind HTTPS on a public domain
+
+Point a DNS record for your domain (for example `memory.example.com`) at the host and terminate TLS with any reverse proxy. The compose file has a commented Caddy service that obtains certificates automatically. Uncomment it, create a `Caddyfile` next to the compose file containing
+
+```
+memory.example.com {
+  reverse_proxy memory:8787
+}
+```
+
+and remove the `ports` mapping of the `memory` service so that only Caddy can reach it. Set `PUBLIC_URL` to the public origin (`https://memory.example.com`). The admin UI compares the `Origin` of writes with the URL the server sees, and behind a TLS proxy that is the public one only if `PUBLIC_URL` says so.
+
+### 4. Configure the Claude cloud environment
+
+Same as [step 3 of the Quick start](#3-configure-the-claude-cloud-environment), with your domain:
+
+1. **Network secret**: host = `memory.example.com`, type Bearer, value = the sync token. Allow this host in the environment's network access.
+2. **Setup script**: render it with your URL and paste it into the environment.
+
+```bash
+selfhost/render-setup-script.sh https://memory.example.com > setup-script.rendered.sh
+cat setup-script.rendered.sh
+```
+
+`sed "s|__MEMSYNC_URL__|https://memory.example.com|g" setup-script.template.sh` does the same. Then verify as in [step 4](#4-verify).
+
+### 5. Admin UI
+
+Set exactly one of the first two rows in `selfhost/.env`. With none of them, `/admin` answers 403, as on Cloudflare.
+
+| Setting | Behavior |
+|---|---|
+| `ADMIN_TOKEN_SHA256` | `/admin` shows a login form. The submitted token is hashed and compared with this value in constant time. Success sets a session cookie: `HttpOnly`, `Secure`, `SameSite=Strict`, path `/admin`, 12 hours, HMAC-signed. Logout revokes the session. After 10 failed logins within a minute the form refuses logins until that minute is over. Set `ADMIN_SESSION_SECRET` so logins survive restarts. For testing over `http://localhost`, set `ADMIN_COOKIE_SECURE=0` |
+| `ADMIN_TRUST_PROXY_HEADER=<name>` | Trust an identity header set by a reverse proxy that authenticates users itself (for example `X-Forwarded-User` from oauth2-proxy or Authelia). Any request with a non-empty value is admitted. Use it only when the proxy strips this header from client requests and the container is reachable only through the proxy; otherwise anyone can send the header |
+| `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD` | Cloudflare Access JWT, as on Cloudflare (the server needs outbound access to your team domain) |
+
+The server refuses to start if more than one mode is set, or if `ADMIN_TOKEN_SHA256` equals `TOKEN_SHA256`.
+
+### 6. Backups and updates
+
+The whole state is one SQLite file, history included. Take a consistent snapshot while the server runs with SQLite's backup API:
+
+```bash
+# on the host, if sqlite3 is installed (the path depends on where the volume lives)
+sqlite3 /path/to/memory.db ".backup backup.db"
+
+# inside the container (no sqlite3 needed)
+docker compose -f selfhost/docker-compose.yml exec memory node --disable-warning=ExperimentalWarning -e \
+  "const {DatabaseSync,backup}=require('node:sqlite');backup(new DatabaseSync('/data/memory.db'),'/data/backup.db')"
+docker compose -f selfhost/docker-compose.yml cp memory:/data/backup.db ./backup.db
+```
+
+A plain `cp` of `memory.db` can miss recent writes that are still in the `-wal` file. To restore, stop the server, replace `memory.db` and delete any `memory.db-wal` and `memory.db-shm` next to it.
+
+To update, run `git pull` and the `up -d --build` command again; the schema is applied idempotently at startup. A server update does not require a setup script change; a client update does, see [Updating the client](#updating-the-client).
+
+Settings:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TOKEN_SHA256` | required | SHA-256 hex of the sync token |
+| `PORT`, `HOST` | `8787`, `0.0.0.0` | Listen port and address |
+| `DB_PATH` | `./data/memory.db` (`/data/memory.db` in the image) | SQLite file |
+| `PUBLIC_URL` | empty | Public origin; needed for the admin UI behind a TLS proxy |
+| `ADMIN_TOKEN_SHA256`, `ADMIN_TRUST_PROXY_HEADER` | empty | Admin auth mode, see above |
+| `ADMIN_SESSION_SECRET` | random per start | Key for the session cookie signature |
+| `ADMIN_COOKIE_SECURE` | `1` | `0` drops the `Secure` flag (localhost over HTTP only) |
+| `MAX_BODY_BYTES` | `104857600` | Request body limit |
+
 ## Admin UI and Cloudflare Access
 
 Open `https://<your-host>/admin` in a browser: view, edit, create and delete memory files, see each file's history and restore a single version, or roll the whole store back to a point in time. One HTML file, no external dependencies, mobile-friendly, light/dark. Language follows the browser (`navigator.language`) with an EN/中文 toggle in the header (the choice is remembered). Files are grouped by `metadata.type` from frontmatter and searchable; a new file is pre-filled with native frontmatter and can append an index line to `MEMORY.md`.
@@ -135,7 +243,7 @@ All writes go through the same `writeRow` as the sync API (sha optimistic lock, 
 
 ### Authentication
 
-The admin UI accepts **only** a Cloudflare Access JWT, not the bearer token (and `/v1/*` accepts only the bearer token). The Worker verifies the `Cf-Access-Jwt-Assertion` header (or the `CF_Authorization` cookie) with WebCrypto: RS256 signature (keys from `${ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`, cached about an hour), `aud` contains `ACCESS_AUD`, `iss` equals the team domain, `exp` and `nbf`.
+On Cloudflare the admin UI accepts **only** a Cloudflare Access JWT, not the bearer token (and `/v1/*` accepts only the bearer token). Self-hosted servers use a login or a proxy header instead, see [Self-hosting](#5-admin-ui). The Worker verifies the `Cf-Access-Jwt-Assertion` header (or the `CF_Authorization` cookie) with WebCrypto: RS256 signature (keys from `${ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`, cached about an hour), `aud` contains `ACCESS_AUD`, `iss` equals the team domain, `exp` and `nbf`.
 
 It is **off by default**: if `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` is empty, every `/admin*` request gets 403. Verification failures are also 403. A custom domain (`HOST`) is the straightforward way to protect `/admin` with Access.
 
@@ -243,17 +351,20 @@ curl -sS -X POST -d '{"at": 1790000000000}' https://memory.example.com/v1/restor
 
 1. Remove the setup script (or the memsync part of it) from each environment, and delete the network secret.
 2. Optionally export the memories first: `curl -sS https://<host>/v1/pull | jq -r '.files[] | "== \(.path)\n\(.content)"'`.
-3. Delete the Worker, the D1 database, the custom domain route and the Access application in the Cloudflare dashboard.
+3. Delete the Worker, the D1 database, the custom domain route and the Access application in the Cloudflare dashboard. Self-hosted: `docker compose -f selfhost/docker-compose.yml down -v` (this also deletes the data volume, so take a backup first).
 
 ## Development
 
 ```bash
 npm install
 npm run check   # node --check + python -m py_compile
-npm test        # test.mjs (admin, Access JWT, API) + test2.mjs (memsync.py end to end), via wrangler dev --local
+npm test        # test.mjs (admin, Access JWT, API) + test2.mjs (memsync.py end to end) on both backends,
+                # plus test3.mjs (self-host admin login and proxy header)
+BACKEND=cf npm test     # only wrangler dev --local
+BACKEND=node npm test   # only the self-host server
 ```
 
-The tests start local Workers with a local JWKS server; no Cloudflare account is needed. `tests/ui.mjs` and `tests/ui2.mjs` are optional Playwright screenshot scripts (`npm install playwright` first).
+The tests start local Workers (and the self-host server) with a local JWKS server; no Cloudflare account is needed. `tests/ui.mjs` and `tests/ui2.mjs` are optional Playwright screenshot scripts (`npm install playwright` first).
 
 ## License
 

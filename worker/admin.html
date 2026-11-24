@@ -64,6 +64,7 @@ td.bad{color:var(--dg)}
  <button id="bStatus"></button>
  <button id="bReload" data-i="reload"></button>
  <button id="bLang" title="Language / 语言"></button>
+ <!--SELFHOST_LOGOUT-->
 </header>
 <main>
  <section id="list">
@@ -83,7 +84,7 @@ const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",
 // ---------- i18n (en / zh) ----------
 const I18N={
  en:{
-  title:"Memory admin",new:"New",restoreAll:"Restore all…",status:"Sync status",backToMem:"Back to memory",reload:"Reload",
+  title:"Memory admin",logout:"Log out",new:"New",restoreAll:"Restore all…",status:"Sync status",backToMem:"Back to memory",reload:"Reload",
   search:"Search path, name, description…",allTypes:"All types",noType:"(no type)",pickFile:"Select a file on the left.",
   noMatch:"No matching files.",openFail:"Failed to open: ",back:"← Back",pathPh:"file name, e.g. feedback_xxx.md",
   addIdx:"Also append an index line to the end of MEMORY.md",save:"Save",del:"Delete",hist:"History",newFile:"New file",
@@ -109,7 +110,7 @@ const I18N={
   h_cli_upgraded:"Claude Code upgraded to %version; verify memory still works in a new session",h_ok:"Sync is healthy",
  },
  zh:{
-  title:"记忆库管理",new:"新建",restoreAll:"整体回滚…",status:"同步状态",backToMem:"返回记忆库",reload:"刷新",
+  title:"记忆库管理",logout:"退出登录",new:"新建",restoreAll:"整体回滚…",status:"同步状态",backToMem:"返回记忆库",reload:"刷新",
   search:"搜索路径、名称、描述…",allTypes:"全部类型",noType:"(无类型)",pickFile:"从左侧选择一个文件。",
   noMatch:"没有匹配的文件。",openFail:"打开失败：",back:"← 返回",pathPh:"文件名，如 feedback_xxx.md",
   addIdx:"同时在 MEMORY.md 末尾追加一行索引",save:"保存",del:"删除",hist:"历史版本",newFile:"新文件",

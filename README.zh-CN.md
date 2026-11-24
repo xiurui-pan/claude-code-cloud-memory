@@ -2,15 +2,16 @@
 
 [English](README.md) | 简体中文
 
-给 Claude Code **cloud session**（claude.ai/code）补上跨会话记忆。记忆存在你自己部署的 Cloudflare Worker + D1 里。
+给 Claude Code **cloud session**（claude.ai/code）补上跨会话记忆。记忆存在你自己部署的服务端里：推荐用 Cloudflare Worker + D1，也可以用同一份代码[自部署](#自部署备选)到一台 Node 服务器上。
 
-Cloud session 每次都在全新的容器里运行，并且默认关闭了原生自动记忆。这个项目在容器里把原生自动记忆重新打开，再把记忆目录同步到你的 Worker：新会话启动时拉取，每轮回复结束时推送。记忆的格式、加载方式、写入规则都沿用 Claude Code 原生机制，所有项目、所有会话共用同一个记忆库。
+Cloud session 每次都在全新的容器里运行，并且默认关闭了原生自动记忆。这个项目在容器里把原生自动记忆重新打开，再把记忆目录同步到你的服务端：新会话启动时拉取，每轮回复结束时推送。记忆的格式、加载方式、写入规则都沿用 Claude Code 原生机制，所有项目、所有会话共用同一个记忆库。
 
 主要特性：
 
 - 原生自动记忆（`MEMORY.md` 索引加每条记忆一个 `.md` 文件），模型侧没有任何自定义逻辑。
 - 服务端：sha 乐观锁、按文件后写者胜、`MEMORY.md` 三方行合并、完整历史和回滚。
-- 管理后台（浏览器）放在 Cloudflare Access 后面：查看、编辑、新建、删除，单个文件的历史，整体回滚，同步状态面板。中英文界面。
+- 管理后台（浏览器）放在 Cloudflare Access 后面，自部署时用 token 登录：查看、编辑、新建、删除，单个文件的历史，整体回滚，同步状态面板。中英文界面。
+- 运行在 Cloudflare（推荐）或自部署（Docker 或 Node 22+，SQLite）上，两者跑同一份 `worker/*.js`。
 - 访问 token 不出现在环境变量、URL 和仓库里（它是 cloud 环境的 network secret）。
 - 出错看得见：对话里的 hook `systemMessage`、管理后台状态面板、Workers Logs。
 
@@ -54,15 +55,19 @@ Cloud session 每次都在全新的容器里运行，并且默认关闭了原生
 
 | 路径 | 作用 |
 |---|---|
-| `worker/index.js` | Worker 入口：bearer 鉴权、pull、push、history、restore、status，`/admin*` 转给 `admin.js` |
+| `worker/index.js` | Worker 入口（自部署服务原样运行它）：bearer 鉴权、pull、push、history、restore、status，`/admin*` 转给 `admin.js` |
 | `worker/store.js` | 共用写入路径：`writeRow`（sha 乐观锁 + 历史行）、`applyOne`、`restoreAt`、`recordStatus` |
-| `worker/admin.js`、`worker/admin.html` | 管理后台：Access JWT 校验、`/admin/api/*`、单文件前端（EN/中文） |
+| `worker/admin.js`、`worker/admin.html` | 管理后台：Access JWT 校验、自部署的登录 session 或代理 header 认证、`/admin/api/*`、单文件前端（EN/中文） |
 | `worker/memsync.py` | Hook 客户端（只用 Python 标准库），由 Worker 以 `/client/memsync.py` 公开提供，内容不含任何密钥 |
 | `worker/schema.sql` | D1 表结构（`files`、`history`、`sync_events`） |
 | `deploy.sh` | 用 Cloudflare REST API 部署：D1、schema、Worker、可选的 Custom Domain |
 | `deploy.env.example` | 部署配置模板（复制为 `deploy.env`，该文件已被 gitignore） |
 | `setup-script.template.sh` | 环境 setup script 模板，`deploy.sh` 会填入你的 URL |
-| `tests/` | 本地测试（`wrangler dev --local`），用 `npm test` 运行 |
+| `selfhost/server.mjs` | 自部署运行时：基于 `node:sqlite` 的 D1 shim，加一层 `node:http` 适配器包住 Worker 的 `fetch()` |
+| `selfhost/text-loader.mjs` | Node 模块钩子，把 `memsync.py` 和 `admin.html` 当字符串模块加载（对应 Cloudflare 的 Text module） |
+| `selfhost/Dockerfile`、`selfhost/docker-compose.yml`、`selfhost/env.example` | 容器镜像、compose 文件（含注释掉的 Caddy 示例）、配置模板 |
+| `selfhost/render-setup-script.sh` | 把你的 URL 填进 setup script 模板（相当于自部署版的 `deploy.sh` 这一步） |
+| `tests/` | 测试，用 `npm test` 运行，分别跑在 `wrangler dev --local` 和自部署服务上（用 `BACKEND=cf` 或 `BACKEND=node` 只跑其中一个） |
 
 ## 快速开始
 
@@ -127,6 +132,109 @@ curl -sS https://memory.example.com/v1/pull | jq -r '.files[] | "== \(.path)\n\(
 
 再开一个新会话，启动时就会加载这条记忆。同时看一下新会话的系统提示里有没有自动记忆的说明（指向 `/root/memory/`）；没有的话，说明开关没生效，见「排错」。
 
+## 自部署（备选）
+
+这个项目推荐用 Cloudflare 运行服务端。它很小，免费额度就够用，不用管服务器、TLS 证书和备份任务。想把所有东西放在自己机器上的话，可以自部署：同一份 `worker/*.js` 跑在 Node 22+ 上，数据存在一个 SQLite 文件里，合并和并发规则只有一份实现。
+
+前置条件：一台装了 Docker（或 Node 22+）的主机，以及一个带有效 TLS 证书的**公网域名**。Cloud session 从 Anthropic 的基础设施经由 egress proxy 访问你的服务，所以 `localhost`、内网地址和纯 HTTP 都不行。
+
+### 1. 生成 token 和哈希
+
+服务端只保存哈希。需要两个不同的 token：sync token（作为 network secret 配进 cloud 环境）和 admin token（在管理后台登录页输入）。
+
+```bash
+SYNC_TOKEN=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
+ADMIN_TOKEN=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
+echo "sync token:  $SYNC_TOKEN"     # 两个都现在存好，哈希无法还原成 token
+echo "admin token: $ADMIN_TOKEN"
+cat > selfhost/.env <<EOF
+TOKEN_SHA256=$(printf %s "$SYNC_TOKEN" | sha256sum | cut -d' ' -f1)
+ADMIN_TOKEN_SHA256=$(printf %s "$ADMIN_TOKEN" | sha256sum | cut -d' ' -f1)
+ADMIN_SESSION_SECRET=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
+PUBLIC_URL=https://memory.example.com
+EOF
+```
+
+macOS 上把 `sha256sum` 换成 `shasum -a 256`。`selfhost/.env` 已被 gitignore，`selfhost/env.example` 列出了所有配置项。
+
+### 2. 启动
+
+```bash
+docker compose -f selfhost/docker-compose.yml --env-file selfhost/.env up -d --build
+curl -sS http://127.0.0.1:8787/health      # {"ok":true}
+```
+
+容器以非 root 用户运行，SQLite 数据库放在 `memory-data` volume 里（`/data/memory.db`）。不用 Docker 的话：`TOKEN_SHA256=<哈希> npm run selfhost`（Node 22+，不需要 `npm install`，数据写到 `./data/memory.db`）。
+
+### 3. 放到公网域名的 HTTPS 后面
+
+把域名（如 `memory.example.com`）的 DNS 指向这台主机，用任意反向代理终结 TLS。compose 文件里有一段注释掉的 Caddy 服务，会自动申请证书：取消注释，在 compose 文件旁创建 `Caddyfile`，内容为
+
+```
+memory.example.com {
+  reverse_proxy memory:8787
+}
+```
+
+再删掉 `memory` 服务的 `ports` 映射，只让 Caddy 能访问它。把 `PUBLIC_URL` 设成公网 origin（`https://memory.example.com`）：管理后台会拿写请求的 `Origin` 和服务端看到的 URL 对比，放在 TLS 代理后面时，只有设了 `PUBLIC_URL` 才会对上。
+
+### 4. 配置 Claude cloud 环境
+
+和[快速开始的第 3 步](#3-配置-claude-cloud-环境)相同，换成你的域名：
+
+1. **Network secret**：主机填 `memory.example.com`，类型 Bearer，值填 sync token。确认该环境的网络访问策略允许这个主机。
+2. **Setup script**：用你的 URL 渲染后粘贴到环境里。
+
+```bash
+selfhost/render-setup-script.sh https://memory.example.com > setup-script.rendered.sh
+cat setup-script.rendered.sh
+```
+
+用 `sed "s|__MEMSYNC_URL__|https://memory.example.com|g" setup-script.template.sh` 效果一样。然后按[第 4 步](#4-验证)验证。
+
+### 5. 管理后台登录
+
+在 `selfhost/.env` 里前两行只设一个。都不设时，`/admin` 和 Cloudflare 上一样返回 403。
+
+| 配置 | 行为 |
+|---|---|
+| `ADMIN_TOKEN_SHA256` | `/admin` 显示登录表单。提交的 token 先做哈希，再与这个值做常量时间比较。成功后下发 session cookie：`HttpOnly`、`Secure`、`SameSite=Strict`、路径 `/admin`、有效期 12 小时、带 HMAC 签名。登出会作废该 session。一分钟内失败 10 次后，到这一分钟结束前登录一律拒绝。设置 `ADMIN_SESSION_SECRET` 后，重启不会让登录失效。在 `http://localhost` 上测试时设 `ADMIN_COOKIE_SECURE=0` |
+| `ADMIN_TRUST_PROXY_HEADER=<名称>` | 信任反向代理设置的身份 header，代理自己负责认证用户（例如 oauth2-proxy、Authelia 的 `X-Forwarded-User`）。只要 header 非空就放行。仅在代理会清除客户端自带的这个 header、且容器只能经代理访问时使用，否则任何人都能自己发这个 header |
+| `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD` | 和 Cloudflare 上一样校验 Access JWT（服务端需要能访问你的团队域名） |
+
+同时设了多个模式，或者 `ADMIN_TOKEN_SHA256` 与 `TOKEN_SHA256` 相同，服务端会拒绝启动。
+
+### 6. 备份和更新
+
+全部状态（包括历史）都在一个 SQLite 文件里。服务运行时用 SQLite 的 backup API 做一致性快照：
+
+```bash
+# 在主机上，已安装 sqlite3 时（路径取决于 volume 所在位置）
+sqlite3 /path/to/memory.db ".backup backup.db"
+
+# 在容器里（不需要 sqlite3）
+docker compose -f selfhost/docker-compose.yml exec memory node --disable-warning=ExperimentalWarning -e \
+  "const {DatabaseSync,backup}=require('node:sqlite');backup(new DatabaseSync('/data/memory.db'),'/data/backup.db')"
+docker compose -f selfhost/docker-compose.yml cp memory:/data/backup.db ./backup.db
+```
+
+直接 `cp` `memory.db` 可能漏掉还在 `-wal` 文件里的最新写入。恢复时先停服务，替换 `memory.db`，并删除旁边的 `memory.db-wal` 和 `memory.db-shm`。
+
+更新时 `git pull`，再执行一次 `up -d --build`，启动时会幂等地应用 schema。服务端更新不需要改 setup script，客户端更新需要，见[更新客户端](#更新客户端)。
+
+配置项：
+
+| 变量 | 默认值 | 含义 |
+|---|---|---|
+| `TOKEN_SHA256` | 必填 | sync token 的 SHA-256 十六进制 |
+| `PORT`、`HOST` | `8787`、`0.0.0.0` | 监听端口和地址 |
+| `DB_PATH` | `./data/memory.db`（镜像里是 `/data/memory.db`） | SQLite 文件 |
+| `PUBLIC_URL` | 空 | 公网 origin，管理后台放在 TLS 代理后面时需要 |
+| `ADMIN_TOKEN_SHA256`、`ADMIN_TRUST_PROXY_HEADER` | 空 | 管理后台认证模式，见上 |
+| `ADMIN_SESSION_SECRET` | 每次启动随机生成 | session cookie 的签名密钥 |
+| `ADMIN_COOKIE_SECURE` | `1` | 设为 `0` 去掉 `Secure` 标志（只用于 localhost 的 HTTP 测试） |
+| `MAX_BODY_BYTES` | `104857600` | 请求体大小上限 |
+
 ## 管理后台和 Cloudflare Access
 
 浏览器打开 `https://<你的域名>/admin`：查看、编辑、新建、删除记忆文件，查看每个文件的历史并恢复单个版本，或者整体回滚到某个时间点。页面是单个 HTML，没有外部依赖，手机宽度可用，随系统切换深浅色。语言跟随浏览器（`navigator.language`），顶部有 EN/中文 切换按钮（选择会被记住）。左侧按 frontmatter 的 `metadata.type` 分组，可搜索；新建文件会预填原生 frontmatter，并可顺手在 `MEMORY.md` 末尾追加一行索引。
@@ -135,7 +243,7 @@ curl -sS https://memory.example.com/v1/pull | jq -r '.files[] | "== \(.path)\n\(
 
 ### 鉴权
 
-管理后台**只认** Cloudflare Access 的 JWT，不接受 bearer token（`/v1/*` 则只认 bearer）。Worker 用 WebCrypto 校验 `Cf-Access-Jwt-Assertion` 头（没有则读 `CF_Authorization` cookie）：RS256 签名（公钥取自 `${ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`，缓存约 1 小时）、`aud` 包含 `ACCESS_AUD`、`iss` 等于团队域名、`exp` 和 `nbf`。
+在 Cloudflare 上，管理后台**只认** Cloudflare Access 的 JWT，不接受 bearer token（`/v1/*` 则只认 bearer）。自部署的服务改用登录页或代理 header，见[自部署](#5-管理后台登录)。Worker 用 WebCrypto 校验 `Cf-Access-Jwt-Assertion` 头（没有则读 `CF_Authorization` cookie）：RS256 签名（公钥取自 `${ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`，缓存约 1 小时）、`aud` 包含 `ACCESS_AUD`、`iss` 等于团队域名、`exp` 和 `nbf`。
 
 **默认关闭**：`ACCESS_TEAM_DOMAIN` 或 `ACCESS_AUD` 任一为空时，所有 `/admin*` 请求返回 403；校验失败同样是 403。用自定义域名（`HOST`）是用 Access 保护 `/admin` 最直接的办法。
 
@@ -244,17 +352,20 @@ curl -sS -X POST -d '{"at": 1790000000000}' https://memory.example.com/v1/restor
 
 1. 从每个环境里删掉 setup script（或其中 memsync 的部分），并删除 network secret。
 2. 需要的话先导出记忆：`curl -sS https://<域名>/v1/pull | jq -r '.files[] | "== \(.path)\n\(.content)"'`。
-3. 在 Cloudflare 控制台删除 Worker、D1 数据库、自定义域名路由和 Access 应用。
+3. 在 Cloudflare 控制台删除 Worker、D1 数据库、自定义域名路由和 Access 应用。自部署的话执行 `docker compose -f selfhost/docker-compose.yml down -v`（会连数据 volume 一起删除，先做好备份）。
 
 ## 开发
 
 ```bash
 npm install
 npm run check   # node --check + python -m py_compile
-npm test        # test.mjs（后台、Access JWT、API）+ test2.mjs（memsync.py 端到端），基于 wrangler dev --local
+npm test        # test.mjs（后台、Access JWT、API）+ test2.mjs（memsync.py 端到端），两种后端各跑一遍，
+                # 另加 test3.mjs（自部署的后台登录和代理 header）
+BACKEND=cf npm test     # 只跑 wrangler dev --local
+BACKEND=node npm test   # 只跑自部署服务
 ```
 
-测试在本地启动 Worker 和一个本地 JWKS 服务，不需要 Cloudflare 账号。`tests/ui.mjs` 和 `tests/ui2.mjs` 是可选的 Playwright 截图脚本（先 `npm install playwright`）。
+测试在本地启动 Worker（以及自部署服务）和一个本地 JWKS 服务，不需要 Cloudflare 账号。`tests/ui.mjs` 和 `tests/ui2.mjs` 是可选的 Playwright 截图脚本（先 `npm install playwright`）。
 
 ## 许可证
 

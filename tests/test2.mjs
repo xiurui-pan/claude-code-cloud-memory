@@ -1,5 +1,5 @@
 import http from "node:http"; import crypto from "node:crypto"; import fs from "node:fs"; import os from "node:os";
-import { spawn, spawnSync, execSync } from "node:child_process"; import assert from "node:assert";
+import { spawnSync } from "node:child_process"; import { start, up, BACKEND } from "./backend.mjs"; import assert from "node:assert";
 import path from "node:path"; import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const b64u = (b) => Buffer.from(b).toString("base64url");
@@ -9,17 +9,17 @@ http.createServer((q, r) => { r.setHeader("content-type", "application/json"); r
 const TEAM = "http://127.0.0.1:8798", AUD = "aud2"; const now0 = Math.floor(Date.now() / 1000);
 const h = b64u(JSON.stringify({ alg: "RS256", kid: "k1" })), p = b64u(JSON.stringify({ aud: [AUD], iss: TEAM, exp: now0 + 3600, nbf: now0 - 10 }));
 const jwt = h + "." + p + "." + b64u(crypto.sign("sha256", Buffer.from(h + "." + p), kp.privateKey));
-const D = path.join(HERE, ".state2"); fs.rmSync(D, { recursive: true, force: true });
-spawnSync("npx", ["wrangler", "d1", "execute", "memsync-test", "--local", "--persist-to", D, "--file", path.join(HERE, "..", "worker", "schema.sql")], { cwd: HERE, stdio: "ignore" });
-const w = spawn("npx", ["wrangler", "dev", "--local", "--port", "8811", "--inspector-port", "9011", "--persist-to", D, "--var", `ACCESS_TEAM_DOMAIN:${TEAM}`, "--var", `ACCESS_AUD:${AUD}`, "--var", "TOKEN_SHA256:" + crypto.createHash("sha256").update("sekret").digest("hex")], { cwd: HERE, detached: true, stdio: "ignore" });
+const D = path.join(HERE, ".state2");
+const w = start({ port: 8811, state: D, vars: { ACCESS_TEAM_DOMAIN: TEAM, ACCESS_AUD: AUD, TOKEN_SHA256: crypto.createHash("sha256").update("sekret").digest("hex") } });
+console.log("backend:", BACKEND);
 const B = "http://127.0.0.1:8811";
-for (let i = 0; i < 120; i++) { try { await fetch(B + "/health"); break; } catch { await new Promise((r) => setTimeout(r, 500)); } }
+await up(8811);
 let pass = 0, fail = 0;
 const t = async (n, f) => { try { await f(); pass++; console.log("PASS", n); } catch (e) { fail++; console.log("FAIL", n, e.message); } };
 const bearer = { authorization: "Bearer sekret", "content-type": "application/json" };
 const post = (b) => fetch(B + "/v1/status", { method: "POST", headers: bearer, body: JSON.stringify(b) });
 const status = async () => (await fetch(B + "/admin/api/status", { headers: { "cf-access-jwt-assertion": jwt } })).json();
-const sql = (q) => JSON.parse(execSync(`npx wrangler d1 execute memsync-test --local --persist-to "${D}" --json --command "${q}"`, { encoding: "utf8", cwd: HERE }))[0].results;
+const sql = w.sql;
 const wipe = () => sql("DELETE FROM sync_events");
 const day = 864e5, ev = (o) => ({ session: "s", event: "pull", ok: true, error: null, files: 1, cli_version: "1.0.0", auto_memory: "unknown", cwd_name: "x", ...o });
 const mem = fs.mkdtempSync(os.tmpdir() + "/m-"), stt = fs.mkdtempSync(os.tmpdir() + "/s-");
@@ -60,5 +60,5 @@ await t("queue capped at 50", async () => { const st3 = fs.mkdtempSync(os.tmpdir
 await t("garbage stdin + no tty ok", async () => { const r = run("push", {}, stt, "not json"); assert.equal(r.status, 0); });
 await t("MEMSYNC_LANG=zh gives Chinese messages", async () => { const r = run("pull", { ...dead, MEMSYNC_LANG: "zh" }, fs.mkdtempSync(os.tmpdir() + "/s-")); const j = JSON.parse(r.stdout); assert(j.systemMessage.startsWith("记忆同步：拉取失败（")); assert(j.systemMessage.includes("没有加载持久记忆")); const st4 = fs.mkdtempSync(os.tmpdir() + "/s-"); fs.writeFileSync(mem + "/bad name!.md", "x\n"); const r2 = run("push", { MEMSYNC_LANG: "zh" }, st4); assert(JSON.parse(r2.stdout).systemMessage.includes("（路径不合法）"), r2.stdout); });
 await t("missing MEMSYNC_URL -> clear systemMessage, exit 0, throttled", async () => { const st5 = fs.mkdtempSync(os.tmpdir() + "/s-"); const r = run("pull", { MEMSYNC_URL: "" }, st5); assert.equal(r.status, 0); const j = JSON.parse(r.stdout); assert(j.systemMessage.includes("MEMSYNC_URL is not set")); assert.equal(j.hookSpecificOutput.additionalContext, j.systemMessage); const r2 = run("push", { MEMSYNC_URL: "" }, st5); assert.equal(r2.stdout, ""); const r3 = run("pull", { MEMSYNC_URL: "", MEMSYNC_LANG: "zh" }, fs.mkdtempSync(os.tmpdir() + "/s-")); assert(JSON.parse(r3.stdout).systemMessage.includes("没有设置 MEMSYNC_URL")); });
-try { process.kill(-w.pid, "SIGKILL"); } catch {}
+w.stop();
 console.log(`pass ${pass} fail ${fail}`); process.exit(fail ? 1 : 0);

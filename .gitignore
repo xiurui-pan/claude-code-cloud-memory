@@ -11,3 +11,6 @@ tests/.state*/
 tests/.wrangler/
 .wrangler/
 tests/shots/
+selfhost/.env
+selfhost/data/
+data/

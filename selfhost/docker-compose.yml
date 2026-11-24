@@ -1,0 +1,46 @@
+# Self-hosted memory server. Run from the repository root:
+#   docker compose -f selfhost/docker-compose.yml --env-file selfhost/.env up -d --build
+# selfhost/.env holds TOKEN_SHA256 etc. (see selfhost/env.example); it is gitignored.
+services:
+  memory:
+    build:
+      context: ..
+      dockerfile: selfhost/Dockerfile
+    restart: unless-stopped
+    environment:
+      TOKEN_SHA256: ${TOKEN_SHA256:?set TOKEN_SHA256 in selfhost/.env}
+      # Admin UI: pick exactly one of the two. Leave both empty to keep /admin disabled (403).
+      ADMIN_TOKEN_SHA256: ${ADMIN_TOKEN_SHA256:-}
+      ADMIN_TRUST_PROXY_HEADER: ${ADMIN_TRUST_PROXY_HEADER:-}
+      # Keeps admin logins valid across restarts (any random string, 16+ chars). Optional.
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-}
+      # Public HTTPS origin of this server; needed for the admin UI behind a TLS proxy.
+      PUBLIC_URL: ${PUBLIC_URL:-}
+    volumes:
+      - memory-data:/data
+    # Without a reverse proxy in front, publish the port. With the Caddy service below, remove this
+    # and let only Caddy reach the container. Bind to 127.0.0.1 if the proxy runs on the same host.
+    ports:
+      - "127.0.0.1:8787:8787"
+
+  # HTTPS with automatic certificates. Uncomment, point DNS for memory.example.com at this host
+  # (ports 80 and 443 open), and remove the "ports" mapping above.
+  #
+  # caddy:
+  #   image: caddy:2
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #
+  # Caddyfile (next to this file):
+  #   memory.example.com {
+  #     reverse_proxy memory:8787
+  #   }
+
+volumes:
+  memory-data:
+  # caddy-data:
