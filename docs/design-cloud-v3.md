@@ -115,7 +115,8 @@ or deployment belong in auto-memory instead.
 - Render: `HEADER` then a blank line then the body; header only when the body is empty.
 - Strip: the first lines must equal the header lines, trailing whitespace ignored; the rest (leading blank lines removed) is the body. If the header was edited or removed, the whole file is treated as body.
 - The server stores only the body at `global/CLAUDE.md`.
-- Merge: `global/CLAUDE.md` and every `MEMORY.md` use the server's 3-way line merge (keep lines other sessions added, drop lines this client removed, append lines this client added). Blank lines in added text are not preserved by a merge, so keep entries as single lines.
+- Merge: `global/CLAUDE.md` and every `MEMORY.md` use the server's positional 3-way merge (diff3 against the base text looked up in `history` by `base_sha`), so edits stay under their heading and blank lines survive. Overlapping edits keep the server's lines plus this client's new lines; an unknown base falls back to appending the client's new lines.
+- New files are pushed with `on_conflict: "rename"`: if another session created the same path meanwhile, the server stores this one as `<stem>.<n>.md` (status `renamed`) and the client renames its copy and relinks the index lines it added.
 
 ## 8. Several projects in one session
 
@@ -177,4 +178,4 @@ Rollback: restore the old setup script; data written to layered paths stays on t
 - **Routing relies on the model**: whether a save lands in CLAUDE.md or auto-memory depends on the header being followed. Misplaced entries are fixed in the admin UI.
 - **Multi-project sessions are best effort**: new-file routing uses the Stop `cwd` and is flagged for review.
 - **Nested repo paths** (more than owner/repo) are not recognized as repos.
-- **Local CLI and desktop app are out of scope** here. Roadmap: a portable client (no `fcntl`, per-OS paths), a first pull that merges instead of mirrors, native per-project memory directories mapped onto the same `projects/<pid>` layer, and reading `~/.claude/CLAUDE.md` natively without a hook-written copy.
+- **Local CLI and desktop app** are covered by [design-local.md](design-local.md).

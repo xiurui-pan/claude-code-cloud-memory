@@ -53,7 +53,8 @@ export function classify(p) {
 // Apply a 3-way line diff for MEMORY.md indexes and global/CLAUDE.md: drop the lines the client removed,
 // append the lines the client added, keep everything other sessions wrote.
 export function mergeIndex(serverText, added, removed) {
-  const removedSet = new Set((removed || []).map((l) => l.trimEnd()));
+  // Blank lines are never treated as removed: a client dropping one blank line must not strip them all.
+  const removedSet = new Set((removed || []).map((l) => l.trimEnd()).filter(Boolean));
   const lines = serverText.replace(/\n+$/, "").split("\n").filter((l) => !removedSet.has(l.trimEnd()));
   const present = new Set(lines.map((l) => l.trimEnd()));
   for (const l of added || []) {
@@ -64,6 +65,108 @@ export function mergeIndex(serverText, added, removed) {
     }
   }
   return lines.join("\n") + "\n";
+}
+
+const toLines = (t) => {
+  const ls = t.split("\n");
+  if (ls.length && ls[ls.length - 1] === "") ls.pop();
+  return ls;
+};
+
+// Longest common subsequence of two line arrays -> Map(aIndex -> bIndex). Files here are small
+// (an index is capped at 200 lines), so the O(n*m) table is fine; null when it would be too large.
+function lcsMap(a, b) {
+  const n = a.length, m = b.length;
+  if (n * m > 4_000_000) return null;
+  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const map = new Map();
+  for (let i = 0, j = 0; i < n && j < m; ) {
+    if (a[i] === b[j]) { map.set(i, j); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+    else j++;
+  }
+  return map;
+}
+
+const sameLines = (x, y) => x.length === y.length && x.every((l, i) => l === y[i]);
+
+// One unstable region of a diff3: both sides changed the same base lines. Keep the server's text,
+// drop the lines the client deleted from the base, then add the client's new non-blank lines.
+function resolveConflict(b, o, t) {
+  const tSet = new Set(t.map((l) => l.trimEnd()));
+  const dropped = new Set(b.filter((l) => l.trim() && !tSet.has(l.trimEnd())).map((l) => l.trimEnd()));
+  const out = o.filter((l) => !dropped.has(l.trimEnd()));
+  const present = new Set(out.map((l) => l.trimEnd()));
+  const bSet = new Set(b.map((l) => l.trimEnd()));
+  for (const l of t) {
+    const k = l.trimEnd();
+    if (k && !bSet.has(k) && !present.has(k)) { out.push(l); present.add(k); }
+  }
+  return out;
+}
+
+// Positional 3-way line merge (diff3): base is what the client last saw, ours is the server's
+// current text, theirs is the client's text. Edits land where they were made, blank lines and
+// headings included. Returns null when the inputs are too large for the line table.
+export function merge3(base, ours, theirs) {
+  const B = toLines(base), O = toLines(ours), T = toLines(theirs);
+  const mo = lcsMap(B, O), mt = lcsMap(B, T);
+  if (!mo || !mt) return null;
+  const out = [];
+  let ib = 0, io = 0, it = 0;
+  const flush = (eb, eo, et) => {
+    const b = B.slice(ib, eb), o = O.slice(io, eo), t = T.slice(it, et);
+    if (sameLines(o, b)) out.push(...t);
+    else if (sameLines(t, b) || sameLines(o, t)) out.push(...o);
+    else out.push(...resolveConflict(b, o, t));
+  };
+  for (let i = 0; i < B.length; i++) {
+    if (!mo.has(i) || !mt.has(i)) continue;
+    const jo = mo.get(i), jt = mt.get(i);
+    if (jo < io || jt < it) continue;
+    flush(i, jo, jt);
+    out.push(O[jo]);
+    ib = i + 1; io = jo + 1; it = jt + 1;
+  }
+  flush(B.length, O.length, T.length);
+  return out.length ? out.join("\n") + "\n" : "";
+}
+
+async function baseContent(env, path, sha) {
+  if (!sha) return null;
+  const row = await env.DB.prepare("SELECT content FROM history WHERE path = ? AND sha = ? AND deleted = 0 ORDER BY id DESC LIMIT 1")
+    .bind(path, sha).first();
+  return row ? row.content : null;
+}
+
+// Store `content` under the first free `projects/p/foo.<n>.md` (n >= 2), skipping names in `avoid`
+// (file names the client holds locally but has not pushed). The write itself is the reservation:
+// INSERT ... DO NOTHING, or UPDATE of a deleted row guarded by its sha, so two sessions racing for
+// the same name end up on different ones. Returns the path, or null.
+async function writeRenamed(env, path, content, sha, avoid, session) {
+  const slash = path.lastIndexOf("/") + 1;
+  const dot = path.lastIndexOf(".");
+  const stem = dot > slash ? path.slice(0, dot) : path, ext = dot > slash ? path.slice(dot) : "";
+  const skip = new Set(Array.isArray(avoid) ? avoid.map(String) : []);
+  for (let n = 2, tries = 0; n < 1000 && tries < 20; n++) {
+    let cand = `${stem}.${n}${ext}`;
+    if (!validPath(cand)) {
+      // too long: shorten the file name (never the folder) so the new path passes the same checks
+      const over = cand.length - path.length + (validPath(path) ? 0 : 1);
+      const base = stem.slice(slash);
+      if (base.length <= over) return null;
+      cand = `${stem.slice(0, stem.length - over)}.${n}${ext}`;
+      if (!validPath(cand)) return null;
+    }
+    if (skip.has(cand.slice(slash))) continue;
+    const row = await env.DB.prepare("SELECT path, content, sha, deleted FROM files WHERE path = ?").bind(cand).first();
+    if (row && !row.deleted) continue;
+    tries++;
+    if (await writeRow(env, cand, row, content, sha, 0, session, Date.now())) return cand;
+  }
+  return null;
 }
 
 export async function writeRow(env, path, cur, content, sha, deleted, session, now) {
@@ -103,14 +206,31 @@ export async function applyOne(env, f, session) {
     }
 
     const sha = await sha256Hex(f.content);
-    if (liveSha === sha) return { path, status: "noop", sha };
+    if (liveSha === sha) {
+      const out = { path, status: "noop", sha };
+      // another session wrote exactly this text: every line this client added is shared with it
+      if (isMergePath(path) && base && liveSha !== base) {
+        const shared = (f.added_lines || []).filter((l) => typeof l === "string" && l.trim());
+        if (shared.length) out.shared_lines = shared;
+      }
+      return out;
+    }
+
+    if (f.on_conflict === "rename" && !base && liveSha !== null && !isMergePath(path)) {
+      // A new file whose name another session took meanwhile: keep both, this one under a free name.
+      const to = await writeRenamed(env, path, f.content, sha, f.avoid, session);
+      if (!to) return { path, status: "retry_exhausted" };
+      return { path, status: "renamed", to, sha };
+    }
 
     let content = f.content;
     let status = "written";
     if (liveSha !== null && liveSha !== base) {
       // Someone else changed it since this client pulled.
       if (isMergePath(path) && cur) {
-        content = mergeIndex(cur.content, f.added_lines, f.removed_lines);
+        const b = await baseContent(env, path, base);
+        const m = b === null ? null : merge3(b, cur.content, f.content);
+        content = m !== null ? m : mergeIndex(cur.content, f.added_lines, f.removed_lines);
         status = "merged";
       } else {
         status = "overwrote_remote"; // last writer wins; previous version stays in history
@@ -119,7 +239,13 @@ export async function applyOne(env, f, session) {
     const finalSha = content === f.content ? sha : await sha256Hex(content);
     if (await writeRow(env, path, cur, content, finalSha, 0, session, now)) {
       const out = { path, status, sha: finalSha };
-      if (status === "merged") out.content = content;
+      if (status === "merged") {
+        out.content = content;
+        // lines this client added that the server already had: an identical line from another session
+        const had = new Set(toLines(cur.content));
+        const shared = (f.added_lines || []).filter((l) => typeof l === "string" && l.trim() && had.has(l));
+        if (shared.length) out.shared_lines = shared;
+      }
       return out;
     }
   }
