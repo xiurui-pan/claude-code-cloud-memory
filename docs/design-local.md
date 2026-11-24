@@ -27,7 +27,7 @@ The v3 client only works in cloud containers. A user who also runs Claude Code o
 
 ### 3.1 Native layout, no global `autoMemoryDirectory`
 
-Local sessions in different projects run concurrently. A single overridden dir would mix every project's files in one place and need the cloud's rename-on-collision logic for unrelated repos. Instead the client works with the native layout: for a session it computes the native dir (section 2), uses it as the memory dir, and keeps state per dir. Claude Code sees an ordinary native memory directory. If the user has set `autoMemoryDirectory` in their user settings, that dir is used as is (all projects then share it, the user chose that).
+Local sessions in different projects run concurrently. A single overridden dir would mix every project's files in one place and need the cloud's rename-on-collision logic for unrelated repos. Instead the client works with the native layout: for a session it computes the native dir (section 2), uses it as the memory dir, and keeps state per dir. Claude Code sees an ordinary native memory directory. If the user has set `autoMemoryDirectory` in their user settings, every project writes into that one dir while the server keeps memory per project; syncing it would route one repo's files into another's project, so in that case only the global `CLAUDE.md` syncs and the dir is left alone (`where` reports `shared_dir: true`).
 
 Cost: the client must compute the same path as the CLI. It is a pure function (`native_slug`, `canonical_git_root`) covered by tests including Windows-style strings, with `where` for checking and the two overrides above for when a CLI version changes the rule.
 

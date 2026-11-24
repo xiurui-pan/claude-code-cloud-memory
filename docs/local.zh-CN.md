@@ -16,3 +16,4 @@ Windows（PowerShell）：`Invoke-WebRequest https://memory.example.com/client/m
 - **已有记忆。** `python3 ~/.claude/memsync/memsync.py migrate` 列出所有能对应到带 `origin` 的 git 仓库的 `~/.claude/projects/*/memory/`（通过 transcript 里记录的 `cwd` 判断）；`migrate --apply` 立即全部同步。平时打开的项目会在第一次会话时由 hook 同步。不是 git 仓库的目录，记忆留在本地，只同步全局文件。
 - **检查和卸载。** `memsync.py where [目录]` 打印某个目录的记忆目录和项目。`memsync.py uninstall` 删除 hook 和写进 `CLAUDE.md` 的开头说明；加 `--purge` 同时删除 `~/.claude/memsync/`（配置、token、状态）。记忆文件不会被动。
 - **限制。** 同一台机器上的多个会话靠文件锁串行。会话启动时 CLI 可能在 hook 拉取完成前就读了 `MEMORY.md`，所以新拉到的内容可能晚一个会话才出现。`MEMSYNC_LANG=zh` 让 hook 提示改成中文。
+- **共用的记忆目录。** 如果用户级 `settings.json` 设了 `autoMemoryDirectory`（所有项目共用一个目录），项目记忆不同步，只同步 `CLAUDE.md`；`memsync.py where` 会显示 `"shared_dir": true`。

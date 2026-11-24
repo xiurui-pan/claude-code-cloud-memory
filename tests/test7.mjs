@@ -138,7 +138,8 @@ await t("native dir: <config>/projects/<slug of git root>/memory; subdir launch 
   assert.equal(np.synced, false); assert.equal(np.project, null);
   const custom = path.join(TMP, "custom-mem");
   fs.mkdirSync(m.cfg, { recursive: true }); fs.writeFileSync(path.join(m.cfg, "settings.json"), JSON.stringify({ autoMemoryDirectory: custom }));
-  assert.equal(m.where(repoA).memory_dir, custom);
+  const cw = m.where(repoA);
+  assert.equal(cw.memory_dir, custom); assert.equal(cw.synced, false); assert.equal(cw.shared_dir, true); // one dir for all projects: not synced per project
 });
 
 await t("Windows-style paths (simulated): slug, long-path hash, hook command quoting, JSON-escaped auto_memory detection, transcript cwd", async () => {
@@ -263,6 +264,27 @@ await t("non-git directory: only the global file syncs, no project memory is cre
   assert.equal(Object.keys(srv()).filter((k) => k.startsWith("projects/")).length, before);
   assert(!Object.keys(srv()).some((k) => k.includes("_norepo")));
   assert(A.claude().includes("- No emoji"));
+});
+
+await t("user-level autoMemoryDirectory (one dir for every project): project memory is not routed to any project, global still syncs", async () => {
+  const C = machine(), custom = path.join(C.home, "shared-mem");
+  fs.mkdirSync(C.cfg, { recursive: true }); fs.writeFileSync(path.join(C.cfg, "settings.json"), JSON.stringify({ autoMemoryDirectory: custom }));
+  assert.equal(C.install().status, 0);
+  fs.mkdirSync(custom, { recursive: true }); fs.writeFileSync(path.join(custom, "from-shared-dir.md"), "written while in repo A\n");
+  C.pull(repoA); C.push(repoA); C.pull(repoB); C.push(repoB);
+  assert(!Object.keys(srv()).some((k) => k.includes("from-shared-dir")), Object.keys(srv()).join());
+  assert.equal(fs.readFileSync(path.join(custom, "from-shared-dir.md"), "utf8"), "written while in repo A\n"); // left alone
+  assert(C.claude().includes("- No emoji"));
+});
+
+await t("first sync with an oversized local MEMORY.md: it is moved aside, not overwritten by the server index", async () => {
+  const D = machine(); D.install();
+  const big = "- line\n".repeat(30000); // > 200 KB, skipped by the uploader
+  D.write(repoA, "MEMORY.md", big);
+  D.pull(repoA);
+  const files = D.files(repoA), dir = D.mem(repoA);
+  assert.equal(D.read(repoA, "MEMORY.md"), srv()[pd(P) + "MEMORY.md"]);
+  assert(files.some((f) => f !== "MEMORY.md" && fs.readFileSync(path.join(dir, f), "utf8") === big), files.join());
 });
 
 // ---------------------------------------------------------------- lock

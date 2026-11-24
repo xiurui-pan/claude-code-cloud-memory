@@ -940,7 +940,7 @@ LOCAL_NO_URL = {
     "en": "Memory sync is not configured: run `python memsync.py install --url <server>` once (or set MEMSYNC_URL).",
     "zh": "记忆同步未配置：请运行一次 `python memsync.py install --url <server>`（或设置 MEMSYNC_URL）。",
 }
-LOCAL = {"root": None, "state_root": None, "global_base": None}
+LOCAL = {"root": None, "state_root": None, "global_base": None, "shared_dir": False}
 _ORIG = {"load_base": load_base, "save_base": save_base, "make_layout": make_layout, "detect_workspace": detect_workspace}
 
 
@@ -1019,6 +1019,8 @@ def native_memory_dir(root):
 
 def local_detect_workspace(hook_in):
     """One repo at most: the git root of the project dir. Unlike cloud there is no scan of subdirectories."""
+    if LOCAL["shared_dir"]:
+        return [], None  # one memory dir for every project (user-level autoMemoryDirectory): no project sync
     root = local_project_root(hook_in)
     top = find_git_root(root)
     info = repo_info(top) if top else None
@@ -1076,7 +1078,7 @@ def local_setup(hook_in, root=None, native=None):
     migrate (explicit project dir and memory dir); hooks derive both from the session."""
     global URL, MEM, STATE, BASE, LAYOUT, NOTIFY, QUEUE, CLI_CACHE, AM_CACHE, GLOBAL_FILE, HEADER, LOCK_PATH, LOCK_TIMEOUT, LOG
     global load_base, save_base, make_layout, detect_workspace
-    LOCAL["root"] = root
+    LOCAL["root"], LOCAL["shared_dir"] = root, False
     sroot = local_state_root()
     LOCAL["state_root"], LOCAL["global_base"] = sroot, sroot / "global_base.json"
     cfg = read_json(sroot / "config.json", {})
@@ -1092,8 +1094,14 @@ def local_setup(hook_in, root=None, native=None):
         MEM = Path(os.path.expanduser(os.environ["MEMSYNC_DIR"]))
     elif native:
         MEM = Path(native)
+    elif repos and user_auto_memory_dir():
+        # Every project writes into the same user-level dir, while the server keeps memory per project:
+        # syncing it would route one repo's files into another's project. Sync only the global file.
+        LOCAL["shared_dir"], repos = True, []
+        log(f"autoMemoryDirectory is set in user settings ({user_auto_memory_dir()}): project memory is not synced, only CLAUDE.md")
+        MEM = sroot / "projects" / "_global" / "memory"
     elif repos:
-        MEM = user_auto_memory_dir() or native_memory_dir(local_project_root(hook_in))
+        MEM = native_memory_dir(local_project_root(hook_in))
     else:
         MEM = sroot / "projects" / "_global" / "memory"  # stays empty: only the global file syncs here
     key = "_global" if not repos else re.sub(r"[^A-Za-z0-9]", "-", MEM.parent.name)[-40:] + "-" + hashlib.sha1(str(MEM).encode("utf-8")).hexdigest()[:8]
@@ -1429,7 +1437,8 @@ def cmd_where(args):
     local_setup({"cwd": root}, root=root)
     repos, top = local_detect_workspace({"cwd": root})
     print(json.dumps({"project_root": root, "git_root": top, "project": repos[0]["url"] if repos else None,
-                      "memory_dir": str(MEM), "synced": bool(repos), "state_dir": str(STATE)}, indent=2))
+                      "memory_dir": str(user_auto_memory_dir() if LOCAL["shared_dir"] else MEM), "synced": bool(repos),
+                      "shared_dir": LOCAL["shared_dir"], "state_dir": str(STATE)}, indent=2))
     return 0
 
 
