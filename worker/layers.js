@@ -142,15 +142,20 @@ async function reparent(env, from, to, session) {
 // Throws Error with .status = 400 on unusable input.
 export async function resolveRepos(env, repos) {
   if (!Array.isArray(repos) || repos.length > 100) throw Object.assign(new Error("repos must be an array (max 100)"), { status: 400 });
-  const map = {}, projects = new Set();
+  const map = {}, projects = new Set(), seen = [];
+  // Pass 1: every repo gets a membership row (its own project unless already known).
   for (const r of repos) {
     const url = r && r.url;
     const repo = normRepo(url);
     if (!repo) continue;
     if (repo.length > MAX_PID) throw Object.assign(new Error(`project id too long (max ${MAX_PID} chars): ${repo.slice(0, 60)}...`), { status: 400 });
-    let row = await member(env, repo);
-    if (!row) { await setMember(env, repo, repo, "self"); row = { repo, pid: repo, source: "self" }; }
-    const pid = row.pid;
+    if (!(await member(env, repo))) await setMember(env, repo, repo, "self");
+    seen.push({ r, url, repo });
+  }
+  // Pass 2: learn submodule membership from every superrepo in this request before mapping anything,
+  // so a submodule listed before its superrepo still lands in the superrepo's project.
+  for (const { r, url, repo } of seen) {
+    const pid = (await member(env, repo)).pid;
     for (const su of Array.isArray(r.submodules) ? r.submodules.slice(0, 200) : []) {
       const sub = resolveRel(su, url);
       if (!sub || sub === repo || sub.length > MAX_PID) continue;
@@ -164,6 +169,10 @@ export async function resolveRepos(env, repos) {
       }
       map[su] = pid;
     }
+  }
+  // Pass 3: map each repo of the session to its (now final) project.
+  for (const { url, repo } of seen) {
+    const pid = (await member(env, repo)).pid;
     map[url] = pid;
     await touchProject(env, pid);
     projects.add(pid);

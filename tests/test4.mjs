@@ -55,6 +55,13 @@ await t("submodules: relative (../, ./) and absolute URLs resolve against the su
   assert(rows.find((x) => x.repo === P && x.source === "self"));
 });
 
+await t("first sight of superrepo + submodule clone in one request: submodule listed first still maps to the superrepo", async () => {
+  // Cloud multi-repo sessions scan /home/user alphabetically, so a submodule clone can come before its superrepo.
+  const r = await resolve([{ url: "https://github.com/acme3/chat" }, { url: "https://github.com/acme3/zplatform", submodules: ["git@github.com:acme3/chat.git"] }]);
+  assert.deepEqual(r.projects, ["github.com/acme3/zplatform"]);
+  assert.equal(r.map["https://github.com/acme3/chat"], "github.com/acme3/zplatform");
+});
+
 await t("unrelated repos give separate projects, sorted and deduped", async () => {
   const r = await resolve([{ url: "https://github.com/acme/tools" }, { url: "https://github.com/acme/docs" }, { url: "https://github.com/ACME/tools.git" }]);
   assert.deepEqual(r.projects, ["github.com/acme/docs", "github.com/acme/tools"]);
