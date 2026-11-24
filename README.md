@@ -4,6 +4,8 @@ English | [简体中文](README.zh-CN.md)
 
 Persistent, cross-session memory for Claude Code **cloud sessions** (claude.ai/code), backed by a server that you host yourself: a Cloudflare Worker + D1 (recommended), or the same code on a small Node server ([self-hosted](#self-hosting-alternative)).
 
+> **Scope:** cloud sessions only for now. The local Claude Code CLI and desktop app are not supported yet; see [Roadmap](#roadmap).
+
 Cloud sessions run in a fresh container each time and ship with native auto-memory turned off. This project turns native auto-memory back on in the container and syncs the memory directory to your server: memory is pulled when a session starts and pushed when a reply finishes. The memory format, loading and write rules are exactly Claude Code's native ones, and one memory store is shared across all projects and sessions.
 
 Features:
@@ -345,7 +347,19 @@ curl -sS -X POST -d '{"at": 1790000000000}' https://memory.example.com/v1/restor
 - **Single-user design.** One token, one shared memory store, no per-user separation. Do not share the token or the admin Access policy with people who should not see all memories.
 - **Do not store secrets in memory.** Memory files are plain text in D1, shown in the admin UI and loaded into every session's context.
 - **Hooks never break a session.** `memsync.py` exits 0 on every failure; the cost is that a sync problem is visible only through the messages and panels above.
-- **Idea, not implemented:** an MCP connector on the Worker so claude.ai chat can query the same memories. It would need its own OAuth flow (custom connectors do not take a static bearer token), so it is left out.
+- **Local CLI / desktop app not supported yet.** Native auto-memory works locally (with OAuth or an API gateway alike), but the sync client is not ready for it; see [Roadmap](#roadmap).
+
+## Roadmap
+
+Planned, not implemented yet:
+
+- **Local Claude Code CLI and desktop app (macOS, Linux, Windows).** Auto-memory itself does not depend on the login method (OAuth or a custom API gateway), so only the sync client needs work:
+  - make `memsync.py` portable (it imports `fcntl`, defaults to `/root/memory`, and the hook command assumes `python3`; Windows also JSON-escapes paths in transcripts, which breaks `auto_memory` detection);
+  - make the first pull merge instead of mirror, so existing local memory is never deleted;
+  - a migration step that merges existing per-project memory dirs (`~/.claude/projects/<project>/memory/`) into one shared directory;
+  - read the token from an environment variable or a restricted token file (there is no egress proxy to inject it locally);
+  - handle several local sessions writing the same directory at once.
+- **MCP connector for claude.ai chat**, so chat can query the same memories. It needs its own OAuth flow (custom connectors do not take a static bearer token).
 
 ## Uninstall
 
