@@ -206,7 +206,15 @@ export async function applyOne(env, f, session) {
     }
 
     const sha = await sha256Hex(f.content);
-    if (liveSha === sha) return { path, status: "noop", sha };
+    if (liveSha === sha) {
+      const out = { path, status: "noop", sha };
+      // another session wrote exactly this text: every line this client added is shared with it
+      if (isMergePath(path) && base && liveSha !== base) {
+        const shared = (f.added_lines || []).filter((l) => typeof l === "string" && l.trim());
+        if (shared.length) out.shared_lines = shared;
+      }
+      return out;
+    }
 
     if (f.on_conflict === "rename" && !base && liveSha !== null && !isMergePath(path)) {
       // A new file whose name another session took meanwhile: keep both, this one under a free name.
@@ -231,7 +239,13 @@ export async function applyOne(env, f, session) {
     const finalSha = content === f.content ? sha : await sha256Hex(content);
     if (await writeRow(env, path, cur, content, finalSha, 0, session, now)) {
       const out = { path, status, sha: finalSha };
-      if (status === "merged") out.content = content;
+      if (status === "merged") {
+        out.content = content;
+        // lines this client added that the server already had: an identical line from another session
+        const had = new Set(toLines(cur.content));
+        const shared = (f.added_lines || []).filter((l) => typeof l === "string" && l.trim() && had.has(l));
+        if (shared.length) out.shared_lines = shared;
+      }
       return out;
     }
   }

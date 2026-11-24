@@ -581,7 +581,8 @@ def do_push(session, hook_in=None):
     if rerender:
         write_local(INDEX, render_index(layout, known))
     ours = {l for c in changes if c["path"].rsplit("/", 1)[-1] == INDEX for l in c.get("added_lines", [])}
-    relink = relink_index(moved, ours)
+    shared = {l for r in res.get("results", []) for l in (r.get("shared_lines") or []) if isinstance(l, str)}
+    relink = relink_index(moved, ours, shared)
     base["v"] = 3
     save_base(base)
     write_json(LAYOUT, layout)
@@ -610,16 +611,27 @@ def rename_local(layout, known, rel, to, text, moved):
     moved[rel] = new
 
 
-def relink_index(moved, ours):
+def relink_index(moved, ours, shared=()):
     """Point the MEMORY.md lines this push added (`ours`) at renamed files; lines from other sessions
-    keep their links. True when MEMORY.md changed and needs another push."""
+    keep their links. A line in `shared` (another session had added the identical line, so it stands
+    for both files) stays, and the relinked line is added after it. True when MEMORY.md changed and
+    needs another push."""
     if not moved:
         return False
     try:
         idx = (MEM / INDEX).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return False
-    fixed = "\n".join(link_rewrite(l, moved) if l in ours else l for l in idx.split("\n"))
+    lines, out = idx.split("\n"), []
+    for l in lines:
+        new = link_rewrite(l, moved) if l in ours else l
+        if new != l and l in shared:
+            out.append(l)
+            if new not in lines:
+                out.append(new)
+        else:
+            out.append(new)
+    fixed = "\n".join(out)
     if fixed == idx:
         return False
     write_local(INDEX, fixed)

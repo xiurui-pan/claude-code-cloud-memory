@@ -233,6 +233,18 @@ await t("new file created in two sessions under the same name: both kept, the la
   assert(!srv()[T + "clash.3.md"]);
 });
 
+await t("same name and identical index line from two sessions: both files keep an index entry", async () => {
+  const root = path.join(wsU, "tools");
+  const X = session(root), Y = session(root);
+  X.pull(); Y.pull();
+  X.write("same.md", "from X\n"); X.write("MEMORY.md", X.read("MEMORY.md") + "- [Same](same.md)\n"); X.push();
+  Y.write("same.md", "from Y\n"); Y.write("MEMORY.md", Y.read("MEMORY.md") + "- [Same](same.md)\n"); Y.push();
+  const T = pd("github.com/acme/tools"), s = srv();
+  assert.equal(s[T + "same.md"].content, "from X\n"); assert.equal(s[T + "same.2.md"].content, "from Y\n");
+  const idx = s[T + "MEMORY.md"].content;
+  assert(idx.includes("- [Same](same.md)\n") && idx.includes("- [Same](same.2.md)\n"), JSON.stringify(idx) + " local=" + JSON.stringify(Y.read("MEMORY.md")) + " files=" + Y.files().join());
+});
+
 await t("same container: pull pushes pending edits first, then mirrors the server (deletions applied)", async () => {
   const s = session(path.join(wsS, "platform")); s.pull();
   s.write("pending.md", "unsent\n");
