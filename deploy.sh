@@ -125,7 +125,7 @@ if [ -n "$HOST" ]; then
 else
   cf -X POST "$API/accounts/$A/workers/scripts/$WORKER_NAME/subdomain" -H 'content-type: application/json' \
     -d '{"enabled":true}' >/dev/null && echo "workers.dev route enabled"
-  SUB=$(cf "$API/accounts/$A/workers/subdomain" | jq -r '.result.subdomain // empty')
+  SUB=$(cf "$API/accounts/$A/workers/subdomain" 2>/dev/null | jq -r '.result.subdomain // empty' || true)
   [ -n "$SUB" ] || { echo "this account has no workers.dev subdomain yet: create one in the dashboard (Workers & Pages) and re-run" >&2; exit 1; }
   URL="https://$WORKER_NAME.$SUB.workers.dev"
 fi
