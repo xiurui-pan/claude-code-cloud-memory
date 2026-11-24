@@ -265,7 +265,7 @@ Settings:
 
 ## Admin UI and Cloudflare Access
 
-Open `https://<your-host>/admin` in a browser: view, edit, create and delete memory files, see each file's history and restore a single version, or roll the whole store back to a point in time. One HTML file, no external dependencies, mobile-friendly, light/dark. Language follows the browser (`navigator.language`) with an EN/中文 toggle in the header (the choice is remembered). Files are grouped by `metadata.type` from frontmatter and searchable; a new file is pre-filled with native frontmatter and can append an index line to `MEMORY.md`.
+Open `https://<your-host>/admin` in a browser: view, edit, create and delete memory files, see each file's history and restore a single version, or roll the whole store back to a point in time. One HTML file, no external dependencies, mobile-friendly, light/dark. Language follows the browser (`navigator.language`) with an EN/中文 toggle in the header (the choice is remembered). Files are grouped by layer (Needs review, Global, each project, Legacy root), can be filtered by `metadata.type` from frontmatter and searched; a new file is pre-filled with native frontmatter and can append an index line to the `MEMORY.md` of its layer.
 
 All writes go through the same `writeRow` as the sync API (sha optimistic lock, history row, session tag `admin`). The editor submits the sha it opened; if the file changed meanwhile the server returns 409 and the page keeps your unsaved text.
 

@@ -265,7 +265,7 @@ docker compose -f selfhost/docker-compose.yml cp memory:/data/backup.db ./backup
 
 ## 管理后台和 Cloudflare Access
 
-浏览器打开 `https://<你的域名>/admin`：查看、编辑、新建、删除记忆文件，查看每个文件的历史并恢复单个版本，或者整体回滚到某个时间点。页面是单个 HTML，没有外部依赖，手机宽度可用，随系统切换深浅色。语言跟随浏览器（`navigator.language`），顶部有 EN/中文 切换按钮（选择会被记住）。左侧按 frontmatter 的 `metadata.type` 分组，可搜索；新建文件会预填原生 frontmatter，并可顺手在 `MEMORY.md` 末尾追加一行索引。
+浏览器打开 `https://<你的域名>/admin`：查看、编辑、新建、删除记忆文件，查看每个文件的历史并恢复单个版本，或者整体回滚到某个时间点。页面是单个 HTML，没有外部依赖，手机宽度可用，随系统切换深浅色。语言跟随浏览器（`navigator.language`），顶部有 EN/中文 切换按钮（选择会被记住）。左侧按层分组（待确认、全局、各个项目、旧版根目录），可按 frontmatter 的 `metadata.type` 过滤和搜索；新建文件会预填原生 frontmatter，并可顺手在所在层的 `MEMORY.md` 末尾追加一行索引。
 
 所有写入都走和同步接口相同的 `writeRow`（sha 乐观锁、写历史，session 标记为 `admin`）。编辑器带着打开时的 sha 提交，服务器上的版本已变就返回 409，页面会提示并保留你未保存的内容。
 
